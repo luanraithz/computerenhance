@@ -142,7 +142,8 @@ char* arr1[][3] = {
 };
 
 const int MEM_REG_TO_MEM_REG = 8; // 1000
-const int ADD_REG = 0; // 1000
+const int ADD_REG = 0; // 0000
+const int SUB_REG = 2; // 1000
 
 const int ACC_TO_MEMORY = 10; // 1100
 const int MEMORY_TO_ACC = ACC_TO_MEMORY; // Both are the same code but they differ in a flag before the w
@@ -225,7 +226,7 @@ int main(int argc, char* argv[]) {
                 printf("mov %s, %d\n", destination, read8Bit(f));
             }
 
-        } else if (opId->id == MEM_REG_TO_MEM_REG || opId->id == ADD_REG) {
+        } else if (opId->id == MEM_REG_TO_MEM_REG || opId->id == ADD_REG || opId->id == SUB_REG) {
             fseek(f, idx, SEEK_SET);
             RegToRegOperation* op = malloc(sizeof(RegToRegOperation));
             fread(op, sizeof(RegToRegOperation), 1, f);
@@ -235,13 +236,10 @@ int main(int argc, char* argv[]) {
                 case 1:
                     {
 
-                        DEBUG("bidx %d\n",  idx);
                         fseek(f, idx, SEEK_SET);
                         ImdToAccAddOperation* op = malloc(sizeof(ImdToAccAddOperation));
                         fread(op, sizeof(ImdToAccAddOperation), 1, f);
                         idx += sizeof(ImdToAccAddOperation);
-                        DEBUG("aidx %d \n",  idx);
-                        DEBUG("w: %d\n", op->w);
 
                         int data = 0;
                         if (op->w == 1) {
@@ -256,6 +254,7 @@ int main(int argc, char* argv[]) {
 
                     }
                     break;
+                case 11:
                 case 32:
                     {
                         fseek(f, idx, SEEK_SET);
@@ -299,12 +298,11 @@ int main(int argc, char* argv[]) {
 
                         DEBUG("mod: %d math_code:%d s:%d rm: %d w: %d\n", op->mod, op->math_code, op->s, op->rm, op->w);
                         // printf("add %s, %d\n", dest, data);
-                        char* opName =  "add";
+                        char* opName = op->math_code == 7 ? "cmp": op->math_code == 5 ? "sub": "add";
                         if (op->mod == 1) {
                                 char* dest = arr1[op->rm][op->w];
                                 printf("%s [%s%s], %d\n", opName, dest, disp, data);
                             } else {
-                                char* dest = arr[op->rm][op->w];
                                 bool isRawReg = op->mod == 3;
                                 if (isRawReg)  {
                                     char* dest = arr[op->rm][op->w];
@@ -317,10 +315,12 @@ int main(int argc, char* argv[]) {
                     }
                     break;
                 case 34:
+                case 10:
                 case 0:
+                case 7:
                     {
                         idx += sizeof(RegToRegOperation);
-                        char* opName = op->op_code == 34 ? "mov": "add";
+                        char* opName = op->op_code == 34 ? "mov": op->op_code == 10? "sub": op->op_code == 7 ? "cmp": "add";
                         DEBUG("cmd: %s mod: %d rm: %d reg: %d w: %d d: %d\n", opName, op->mod, op->rm, op->reg, op->w, op->d);
                         if (op->mod == 3) {
                             char* destination = arr[op->d == 1 ? op->reg : op->rm][op->w];
