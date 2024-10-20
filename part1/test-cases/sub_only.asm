@@ -14,7 +14,7 @@ sub [bx + 2], cx
 sub [bp + si + 4], bh
 sub [bp + di + 6], di
 sub byte [bx], 34
-sub word [bp + si + 1000], 29
+sub word [bx + di], 29
 sub ax, [bp]
 sub al, [bx + si]
 sub ax, bx

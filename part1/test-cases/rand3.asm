@@ -1,1 +1,1 @@
-add al, -30
+add si, 2
