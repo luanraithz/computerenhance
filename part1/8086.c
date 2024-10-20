@@ -20,9 +20,9 @@
     MOV [75], BX
 
     Where 75 is an arbitrary memory address
+ *
+ * registers/accumulator ending with x are 16 bits, in other words, it includes both the high and low parts 
  */
-
-
 
 /**
  *
@@ -71,12 +71,29 @@ typedef struct ImdToRegOperation {
 
 typedef struct ImdToRegMemOperation {
     unsigned int w: 1;
-    unsigned int op_code: 7; 
+    unsigned int s: 1;
+    unsigned int op_code: 6; 
 
     RM;
     PAD(3);
     MOD;
 } ImdToRegMemOperation;
+
+typedef struct ImdToAccAddOperation {
+    unsigned int w: 1;
+    PAD(1);
+    unsigned int op_code: 6; 
+} ImdToAccAddOperation;
+
+typedef struct ImdToRegMemAddOperation {
+    unsigned int w: 1;
+    unsigned int s: 1;
+    unsigned int op_code: 6; 
+
+    RM;
+    unsigned int math_code: 3; 
+    MOD;
+} ImdToRegMemAddOperation;
 
 typedef struct ByteData {
     int value: 8;
@@ -125,6 +142,7 @@ char* arr1[][3] = {
 };
 
 const int MEM_REG_TO_MEM_REG = 8; // 1000
+const int ADD_REG = 0; // 1000
 
 const int ACC_TO_MEMORY = 10; // 1100
 const int MEMORY_TO_ACC = ACC_TO_MEMORY; // Both are the same code but they differ in a flag before the w
@@ -132,7 +150,10 @@ const int MEMORY_TO_ACC_FLAG = 0;
 const int ACC_TO_MEMORY_FLAG = 1; 
 const int IMMEDIATE_TO_REG = 11; // 1011
 const int IMD_TO_MEM_REG = 12; // 1100
+                               //
+                               //
 
+#define DEBUG(pattern, ...) if (argv[2] != NULL && argv[2][0] == 'D') { printf(pattern, __VA_ARGS__); }
 
 int read16Bit(FILE* f) {
     DoubleByteData* data = malloc(sizeof(DoubleByteData));
@@ -150,6 +171,21 @@ int read8Bit(FILE* f) {
     return value;
 }
 
+#define parse_displacement(mod, rm) {\
+    if (mod == 1) { \
+        value = read8Bit(f); \
+        *idx = idx + sizeof(ByteData); \
+    } else if (mod == 2 || (rm != NULL && *rm == 6)) { \
+        value = read16Bit(f); \
+        idx+= sizeof(DoubleByteData); \
+    } \
+    char disp[100] = ""; \
+    if (value != 0 && value > 0) { \
+        sprintf(disp, " + %d", value); \
+    } else if (value < 0) { \
+        sprintf(disp, " - %d", abs(value)); \
+    } \
+}
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -166,7 +202,7 @@ int main(int argc, char* argv[]) {
     int idx = 0;
     while (fread(opId, sizeof(OpIdentifier), 1, f)) {
 
-        //printf("opId: %d\n", opId->id);
+        DEBUG("opId: %d\n", opId->id);
         if (opId->id == 9) {
             fseek(f, idx, SEEK_SET);
             idx += sizeof(ImdToRegOrMemOperation);
@@ -180,48 +216,126 @@ int main(int argc, char* argv[]) {
 
             char* destination = arr[regOp->reg][regOp->w];
             if (regOp->w) {
-                DoubleByteData* data = malloc(sizeof(DoubleByteData));
                 fseek(f, idx, SEEK_SET);
-                fread(data, sizeof(DoubleByteData), 1, f);
                 idx += sizeof(DoubleByteData);
-                printf("mov %s, %d\n", destination, data->value);
+                printf("mov %s, %d\n", destination, read16Bit(f));
             } else {
-                ByteData* data = malloc(sizeof(ByteData));
                 fseek(f, idx, SEEK_SET);
-                fread(data, sizeof(ByteData), 1, f);
                 idx += sizeof(ByteData);
-                printf("mov %s, %d\n", destination, data->value);
+                printf("mov %s, %d\n", destination, read8Bit(f));
             }
 
-        } else if (opId->id == MEM_REG_TO_MEM_REG) {
+        } else if (opId->id == MEM_REG_TO_MEM_REG || opId->id == ADD_REG) {
             fseek(f, idx, SEEK_SET);
             RegToRegOperation* op = malloc(sizeof(RegToRegOperation));
             fread(op, sizeof(RegToRegOperation), 1, f);
-            idx += sizeof(RegToRegOperation);
 
+            DEBUG("code: %d\n", op->op_code);
             switch (op->op_code) {
-                case 34:
+                case 1:
                     {
-                        // printf("mod: %d rm: %d reg: %d w: %d d: %d\n", op->mod, op->rm, op->reg, op->w, op->d);
+
+                        DEBUG("bidx %d\n",  idx);
+                        fseek(f, idx, SEEK_SET);
+                        ImdToAccAddOperation* op = malloc(sizeof(ImdToAccAddOperation));
+                        fread(op, sizeof(ImdToAccAddOperation), 1, f);
+                        idx += sizeof(ImdToAccAddOperation);
+                        DEBUG("aidx %d \n",  idx);
+                        DEBUG("w: %d\n", op->w);
+
+                        int data = 0;
+                        if (op->w == 1) {
+                            data = read16Bit(f);
+                            idx+= sizeof(DoubleByteData);
+                            printf("add ax, %d\n",  data);
+                        } else {
+                            data = read8Bit(f);
+                            idx+= sizeof(ByteData);
+                            printf("add al, %d\n",  data);
+                        }
+
+                    }
+                    break;
+                case 32:
+                    {
+                        fseek(f, idx, SEEK_SET);
+                        ImdToRegMemAddOperation* op = malloc(sizeof(ImdToRegMemAddOperation));
+                        fread(op, sizeof(ImdToRegMemAddOperation), 1, f);
+                        idx += sizeof(ImdToRegMemAddOperation);
+
+                        int value = 0;
+                        if (op->mod == 1) {
+                            // 8 bit displacement
+                            value = read8Bit(f);
+                            idx+= sizeof(ByteData);
+                        } else if (op->mod == 2) {
+                            // 16 bit displacement
+                            value = read16Bit(f);
+                            idx+= sizeof(DoubleByteData);
+                        }
+                        char disp[100] = "";
+                        if (value != 0 && value > 0) {
+                            sprintf(disp, " + %d", value);
+                        } else if (value < 0) {
+                            sprintf(disp, " - %d", abs(value));
+                        }
+                        int data = 0;
+                        if (op->s == 1 && op->w != 1) {
+                            data = read16Bit(f);
+                            idx+= sizeof(DoubleByteData);
+                        } else {
+                            data = read8Bit(f);
+                            idx+= sizeof(ByteData);
+                        }
+
+                        char* prefix = "";
+                        if (op->mod != 3) {
+                            if (op->s == op->w && op->w) {
+                                prefix = "word";
+                            } else {
+                                prefix = "byte ";
+                            }
+                        }
+
+                        DEBUG("mod: %d math_code:%d s:%d rm: %d w: %d\n", op->mod, op->math_code, op->s, op->rm, op->w);
+                        // printf("add %s, %d\n", dest, data);
+                        char* opName =  "add";
+                        if (op->mod == 1) {
+                                char* dest = arr1[op->rm][op->w];
+                                printf("%s [%s%s], %d\n", opName, dest, disp, data);
+                            } else {
+                                char* dest = arr[op->rm][op->w];
+                                bool isRawReg = op->mod == 3;
+                                if (isRawReg)  {
+                                    char* dest = arr[op->rm][op->w];
+                                    printf("%s %s%s, %d\n",  opName, dest, disp, data);
+                                } else {
+                                    char* dest = arr1[op->rm][op->w];
+                                    printf("%s %s [%s%s], %d\n", opName, prefix, dest, disp, data);
+                                }
+                            }
+                    }
+                    break;
+                case 34:
+                case 0:
+                    {
+                        idx += sizeof(RegToRegOperation);
+                        char* opName = op->op_code == 34 ? "mov": "add";
+                        DEBUG("cmd: %s mod: %d rm: %d reg: %d w: %d d: %d\n", opName, op->mod, op->rm, op->reg, op->w, op->d);
                         if (op->mod == 3) {
                             char* destination = arr[op->d == 1 ? op->reg : op->rm][op->w];
                             char* source = arr[op->d == 1 ? op->rm : op->reg][op->w];
-                            printf("mov %s, %s\n", destination, source);
+                            printf("%s %s, %s\n", opName, destination, source);
                         } else  {
-                            // Memory involved MOV
                             int value = 0;
                             bool isTargetMemoryWrite = op->d == 0 ;
                             if (op->mod == 1) {
-                                // 8 bit displacement
                                 value = read8Bit(f);
                                 idx+= sizeof(ByteData);
                             } else if (op->mod == 2 || op->rm == 6) {
-                                // 16 bit displacement
                                 value = read16Bit(f);
                                 idx+= sizeof(DoubleByteData);
                             }
-                            // op->mod == 0 doesnt have displacement
-                            //
                             char disp[100] = "";
                             if (value != 0 && value > 0) {
                                 sprintf(disp, " + %d", value);
@@ -236,20 +350,20 @@ int main(int argc, char* argv[]) {
                                     dest = arr[op->reg][1];
                                 }
                                 if (op->d != 1)  {
-                                    printf("mov [%s%s], %s\n", dest, disp, src);
+                                    printf("%s [%s%s], %s\n", opName, dest, disp, src);
                                 } else {
-                                    printf("mov %s, [%s%s]\n", src, dest, disp);
+                                    printf("%s %s, [%s%s]\n", opName, src, dest, disp);
                                 }
                             } else {
                                 char* str = arr1[op->rm][op->mod];
-                                char* dest = arr[(op->d == 0 || op->rm == 6 && op->mod == 0) ? op->reg: op->rm][op->w];
+                                char* dest = arr[(op->d == 0 || (op->mod == 0)) ? op->reg: op->rm][op->w];
                                 if (isTargetMemoryWrite)  {
-                                    printf("mov [%s%s], %s\n", str, disp, dest);
+                                    printf("%s [%s%s], %s\n", opName, str, disp, dest);
                                 } else {
                                     if (op->rm == 6 && op->mod == 0) {
-                                        printf("mov %s, [%d]\n", dest, value);
+                                        printf("%s %s, [%d]\n", opName, dest, value);
                                     } else {
-                                        printf("mov %s, [%s%s]\n", dest, str, disp);
+                                        printf("%s %s, [%s%s]\n", opName, dest, str, disp);
                                     }
                                 }
                             }
@@ -257,26 +371,27 @@ int main(int argc, char* argv[]) {
                     }
                     break;
                 default:
-                      printf("Operation not handled %d \n", op->op_code);
+                      idx += sizeof(RegToRegOperation);
+                      DEBUG("Operation not handled %d \n", op->op_code);
             } 
         } else if (opId->id == IMD_TO_MEM_REG) {
             fseek(f, idx, SEEK_SET);
             ImdToRegMemOperation* op = malloc(sizeof(ImdToRegMemOperation));
             fread(op, sizeof(ImdToRegMemOperation), 1, f);
             idx += sizeof(ImdToRegMemOperation);
-            int value = 0;
+            int dispValue = 0;
             if (op->mod == 1) {
-                value = read8Bit(f);
+                dispValue = read8Bit(f);
                 idx+= sizeof(ByteData);
             } else if (op->mod == 2 || op->rm == 6) {
-                value = read16Bit(f);
+                dispValue = read16Bit(f);
                 idx+= sizeof(DoubleByteData);
             }
             char disp[100] = "";
-            if (value != 0 && value > 0) {
-                sprintf(disp, " + %d", value);
-            } else if (value < 0) {
-                sprintf(disp, " - %d", abs(value));
+            if (dispValue != 0 && dispValue > 0) {
+                sprintf(disp, " + %d", dispValue);
+            } else if (dispValue < 0) {
+                sprintf(disp, " - %d", abs(dispValue));
             }
 
             int data = 0;
@@ -292,8 +407,18 @@ int main(int argc, char* argv[]) {
                 idx+= sizeof(DoubleByteData);
                 prefix = "word";
             }
-            char* dest = arr1[op->rm][op->w];
-            printf("mov [%s%s], %s %d\n", dest, disp, prefix, data);
+
+            DEBUG("mod: %d rm: %d w: %d\n", op->mod, op->rm, op->w);
+            if (op->mod == 3)
+            {
+                char* dest = arr[op->rm][op->w];
+                printf("mov %s, %s %d\n", dest, prefix, data);
+            }
+            else
+            {
+                char* dest = arr1[op->rm][op->w];
+                printf("mov [%s%s], %s %d\n", dest, disp, prefix, data);
+            }
         } else if (opId->id == ACC_TO_MEMORY) {
             fseek(f, idx, SEEK_SET);
             AccumulatorToMemory* op = malloc(sizeof(AccumulatorToMemory));
@@ -310,7 +435,8 @@ int main(int argc, char* argv[]) {
 
         } else if (opId->id == 0) {
             printf("Add \n");
-
+        } else {
+            idx += sizeof(RegToRegOperation);
         }
     }
     free(op);
