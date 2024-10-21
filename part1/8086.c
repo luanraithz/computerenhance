@@ -173,20 +173,35 @@ int read8Bit(FILE* f) {
     return value;
 }
 
-#define parse_displacement(mod, rm) {\
-    if (mod == 1) { \
-        value = read8Bit(f); \
-        *idx = idx + sizeof(ByteData); \
-    } else if (mod == 2 || (rm != NULL && *rm == 6)) { \
-        value = read16Bit(f); \
-        idx+= sizeof(DoubleByteData); \
-    } \
-    char disp[100] = ""; \
-    if (value != 0 && value > 0) { \
-        sprintf(disp, " + %d", value); \
-    } else if (value < 0) { \
-        sprintf(disp, " - %d", abs(value)); \
-    } \
+typedef struct {
+    int value;
+    char* label;
+} Displacement;
+
+char* empty = "";
+
+Displacement read_displacement(int mod, int rm, FILE* f, int* idx) {
+    int value = 0;
+    if (mod == 1) {
+        value = read8Bit(f);
+        (*idx) += sizeof(ByteData);
+    } else if (mod == 2 || (mod == 0 && rm == 6)) {
+        value = read16Bit(f);
+        (*idx) += sizeof(DoubleByteData);
+    }
+    char* disp = malloc(sizeof(char) * 100);
+    if (value != 0 && value > 0) {
+        sprintf(disp, " + %d", value);
+        Displacement d = { .value = value, .label = disp };
+        return d;
+    } else if (value < 0) {
+        sprintf(disp, " - %d", abs(value));
+        Displacement d = { .value = value, .label = disp };
+        return d;
+    }
+    free(disp);
+    Displacement d = { .value = 0, .label = empty };
+    return d;
 }
 
 int main(int argc, char* argv[]) {
@@ -235,6 +250,7 @@ int main(int argc, char* argv[]) {
             DEBUG("code: %d\n", op->op_code);
             switch (op->op_code) {
                 case 11:
+                case 15:
                 case 1:
                     {
 
@@ -244,7 +260,7 @@ int main(int argc, char* argv[]) {
                         idx += sizeof(ImdToAccAddOperation);
 
                         int data = 0;
-                        char* opName = op->op_code == 11 ? "sub": "add";
+                        char* opName = op->op_code == 11 ? "sub": op->op_code == 15 ? "cmp" : "add";
                         if (op->w == 1) {
                             data = read16Bit(f);
                             idx+= sizeof(DoubleByteData);
@@ -264,30 +280,7 @@ int main(int argc, char* argv[]) {
                         fread(op, sizeof(ImdToRegMemAddOperation), 1, f);
                         idx += sizeof(ImdToRegMemAddOperation);
 
-                        int value = 0;
-                        if (op->mod == 1) {
-                            // 8 bit displacement
-                            value = read8Bit(f);
-                            idx+= sizeof(ByteData);
-                        } else if (op->mod == 2 || (op->mod == 0 && op->rm == 6)) {
-                            // 16 bit displacement
-                            value = read16Bit(f);
-                            idx+= sizeof(DoubleByteData);
-                        }
-                        char disp[100] = "";
-                        if (value != 0 && value > 0) {
-                            sprintf(disp, " + %d", value);
-                        } else if (value < 0) {
-                            sprintf(disp, " - %d", abs(value));
-                        }
-                        int data = 0;
-                        if (op->s == 1 && op->w != 1) {
-                            data = read16Bit(f);
-                            idx+= sizeof(DoubleByteData);
-                        } else {
-                            data = read8Bit(f);
-                            idx+= sizeof(ByteData);
-                        }
+                        Displacement disp = read_displacement(op->mod, op->rm, f, &idx);
 
                         char* prefix = "";
                         if (op->mod != 3) {
@@ -298,13 +291,22 @@ int main(int argc, char* argv[]) {
                             }
                         }
 
+                        int data = 0;
+                        if (op->s == 1 && op->w != 1) {
+                            data = read16Bit(f);
+                            idx+= sizeof(DoubleByteData);
+                        } else {
+                            data = read8Bit(f);
+                            idx+= sizeof(ByteData);
+                        }
+
                         DEBUG("mod: %d math_code:%d s:%d rm: %d w: %d\n", op->mod, op->math_code, op->s, op->rm, op->w);
                         // printf("add %s, %d\n", dest, data);
                         char* opName = op->math_code == 7 ? "cmp": op->math_code == 5 ? "sub": "add";
                         if (op->mod == 1) {
                                 char* dest = arr1[op->rm][op->w];
-                                if (value != 0) {
-                                    printf("%s [%s%s], %d\n", opName, dest, disp, data);
+                                if (disp.value != 0) {
+                                    printf("%s [%s%s], %d\n", opName, dest, disp.label, data);
                                 } else {
                                     printf("%s %s, %d\n", opName, dest, data);
                                 }
@@ -312,17 +314,17 @@ int main(int argc, char* argv[]) {
                                 bool isRawReg = op->mod == 3;
                                 if (isRawReg)  {
                                     char* dest = arr[op->rm][op->w];
-                                    if (value != 0) {
-                                        printf("%s [%s%s], %d\n", opName, dest, disp, data);
+                                    if (disp.value != 0) {
+                                        printf("%s [%s%s], %d\n", opName, dest, disp.label, data);
                                     } else {
                                         printf("%s %s, %d\n", opName, dest, data);
                                     }
                                 } else {
                                     char* dest = arr1[op->rm][op->w];
                                     if (op->rm == 6) {
-                                        printf("%s %s [%d], %d\n", opName, prefix, value, data);
+                                        printf("%s %s [%d], %d\n", opName, prefix, disp.value, data);
                                     } else {
-                                        printf("%s %s [%s%s], %d\n", opName, prefix, dest, disp, data);
+                                        printf("%s %s [%s%s], %d\n", opName, prefix, dest, disp.label , data);
                                     }
                                 }
                             }
@@ -341,21 +343,8 @@ int main(int argc, char* argv[]) {
                             char* source = arr[op->d == 1 ? op->rm : op->reg][op->w];
                             printf("%s %s, %s\n", opName, destination, source);
                         } else  {
-                            int value = 0;
+                            Displacement disp = read_displacement(op->mod, op->rm, f, &idx);
                             bool isTargetMemoryWrite = op->d == 0 ;
-                            if (op->mod == 1) {
-                                value = read8Bit(f);
-                                idx+= sizeof(ByteData);
-                            } else if (op->mod == 2 || op->rm == 6) {
-                                value = read16Bit(f);
-                                idx+= sizeof(DoubleByteData);
-                            }
-                            char disp[100] = "";
-                            if (value != 0 && value > 0) {
-                                sprintf(disp, " + %d", value);
-                            } else if (value < 0) {
-                                sprintf(disp, " - %d", abs(value));
-                            }
 
                             if (op->mod == 1) {
                                 char* src = arr[op->reg][op->w];
@@ -364,20 +353,20 @@ int main(int argc, char* argv[]) {
                                     dest = arr[op->reg][1];
                                 }
                                 if (op->d != 1)  {
-                                    printf("%s [%s%s], %s\n", opName, dest, disp, src);
+                                    printf("%s [%s%s], %s\n", opName, dest, disp.label, src);
                                 } else {
-                                    printf("%s %s, [%s%s]\n", opName, src, dest, disp);
+                                    printf("%s %s, [%s%s]\n", opName, src, dest, disp.label);
                                 }
                             } else {
                                 char* str = arr1[op->rm][op->mod];
                                 char* dest = arr[(op->d == 0 || (op->mod == 0)) ? op->reg: op->rm][op->w];
                                 if (isTargetMemoryWrite)  {
-                                    printf("%s [%s%s], %s\n", opName, str, disp, dest);
+                                    printf("%s [%s%s], %s\n", opName, str, disp.label, dest);
                                 } else {
                                     if (op->rm == 6 && op->mod == 0) {
-                                        printf("%s %s, [%d]\n", opName, dest, value);
+                                        printf("%s %s, [%d]\n", opName, dest, disp.value);
                                     } else {
-                                        printf("%s %s, [%s%s]\n", opName, dest, str, disp);
+                                        printf("%s %s, [%s%s]\n", opName, dest, str, disp.label);
                                     }
                                 }
                             }
@@ -393,20 +382,7 @@ int main(int argc, char* argv[]) {
             ImdToRegMemOperation* op = malloc(sizeof(ImdToRegMemOperation));
             fread(op, sizeof(ImdToRegMemOperation), 1, f);
             idx += sizeof(ImdToRegMemOperation);
-            int dispValue = 0;
-            if (op->mod == 1) {
-                dispValue = read8Bit(f);
-                idx+= sizeof(ByteData);
-            } else if (op->mod == 2 || op->rm == 6) {
-                dispValue = read16Bit(f);
-                idx+= sizeof(DoubleByteData);
-            }
-            char disp[100] = "";
-            if (dispValue != 0 && dispValue > 0) {
-                sprintf(disp, " + %d", dispValue);
-            } else if (dispValue < 0) {
-                sprintf(disp, " - %d", abs(dispValue));
-            }
+            Displacement disp = read_displacement(op->mod, op->rm, f, &idx); 
 
             int data = 0;
             char* prefix = NULL;
@@ -431,7 +407,7 @@ int main(int argc, char* argv[]) {
             else
             {
                 char* dest = arr1[op->rm][op->w];
-                printf("mov [%s%s], %s %d\n", dest, disp, prefix, data);
+                printf("mov [%s%s], %s %d\n", dest, disp.label, prefix, data);
             }
         } else if (opId->id == ACC_TO_MEMORY) {
             fseek(f, idx, SEEK_SET);
