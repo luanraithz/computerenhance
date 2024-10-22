@@ -198,6 +198,25 @@ typedef struct {
 
 char* empty = "";
 
+Displacement* read_displacement_ptr(int mod, int rm, FILE* f, int* idx) {
+    int value = 0;
+    if (mod == 1) {
+        value = read8Bit(f, idx);
+    } else if (mod == 2 || (mod == 0 && rm == 6)) {
+        value = read16Bit(f, idx);
+    }
+    char* disp = malloc(sizeof(char) * 100);
+    Displacement* dispStr = malloc(sizeof(Displacement));
+    if (value != 0 && value > 0) {
+        sprintf(disp, " + %d", value);
+    } else if (value < 0) {
+        sprintf(disp, " - %d", abs(value));
+    }
+    dispStr->value = value;
+    dispStr->label = disp;
+    return dispStr;
+}
+
 Displacement read_displacement(int mod, int rm, FILE* f, int* idx) {
     int value = 0;
     if (mod == 1) {
@@ -228,9 +247,15 @@ enum ReferenceType {
 };
 
 char* MOV = "mov";
+char* SUB = "sub";
+char* ADD = "add";
+char* CMP = "cmp";
+char* AX = "ax";
+char* AL = "al";
 
 typedef struct {
     char* adrr;
+    char* prefix;
     Displacement* disp;
     int value;
     enum ReferenceType type;
@@ -247,16 +272,20 @@ typedef struct Operation {
 } Operation;
 
 
-Operation* multi_reference_operation(char* opName, int idx) {
+Operation* multi_reference_operation(char* opName, int idx, int size) {
     Operation* op = malloc(sizeof(Operation));
     op->name = opName;
-    op->currentIdx = idx;
+    op->currentIdx = idx - size;
+    op->size = size;
     Reference* left = malloc(sizeof(Reference));
     op->left = left;
     Reference* right = malloc(sizeof(Reference));
     op->right = right;
     return op;
 }
+
+char* word = "word";
+char* byte = "byte";
 
 char* render_reference(Reference* ref) {
     char* str = malloc(sizeof(char) * 30);
@@ -265,17 +294,31 @@ char* render_reference(Reference* ref) {
             sprintf(str,"%d", ref->value);
             break;
         case DirectAccess:
-            sprintf(str,"[%d]", ref->value);
+            {
+                if (ref->prefix != NULL) {
+                    sprintf(str,"%s [%d]", ref->prefix, ref->value);
+                } else {
+                    sprintf(str,"[%d]", ref->value);
+                }
+            }
             break;
         case Raw:
             sprintf(str,"%s", ref->adrr);
             break;
         case Expression:
             {
-                if (ref->disp != NULL) {
-                    sprintf(str,"[%s%s]", ref->adrr, ref->disp->label);
+                if (ref->disp != NULL && ref->disp->value > 0) {
+                    if (ref->prefix != NULL) {
+                        sprintf(str,"%s [%s%s]", ref->prefix, ref->adrr, ref->disp->label);
+                    } else {
+                        sprintf(str,"[%s%s]", ref->adrr, ref->disp->label);
+                    }
                 } else {
-                    sprintf(str,"[%s]", ref->adrr);
+                    if (ref->prefix != NULL) {
+                        sprintf(str,"%s [%s]", ref->prefix, ref->adrr);
+                    } else {
+                        sprintf(str,"[%s]", ref->adrr);
+                    }
                 }
             }
     }
@@ -304,8 +347,10 @@ int main(int argc, char* argv[]) {
     RegToRegOperation *op = malloc(sizeof(RegToRegOperation));
     OpIdentifier *opId = malloc(sizeof(OpIdentifier));
     int idx = 0;
+    Operation* initial = NULL;
+    Operation* current = NULL;
     while (fread(opId, sizeof(OpIdentifier), 1, f)) {
-
+        Operation* operation = NULL;
         DEBUG("opId: %d\n", opId->id);
         if (opId->id == 9) {
             fseek(f, idx, SEEK_SET);
@@ -316,16 +361,14 @@ int main(int argc, char* argv[]) {
             int size = sizeof(ImdToRegOperation);
             ImdToRegOperation* regOp = malloc(size);
             fread(regOp, size, 1, f);
-            Operation* op = multi_reference_operation(MOV, idx);
             idx += sizeof(ImdToRegOperation);
+            operation = multi_reference_operation(MOV, idx, sizeof(ImdToRegOperation));
 
             char* destination = arr[regOp->reg][regOp->w];
-            op->left->adrr = destination;
-            op->left->type = Raw;
-            op->right->type = Value;
-            op->right->value = regOp->w ? read16Bit(f, &idx): read8Bit(f, &idx);
-            render_op(op);
-
+            operation->left->adrr = destination;
+            operation->left->type = Raw;
+            operation->right->type = Value;
+            operation->right->value = regOp->w ? read16Bit(f, &idx): read8Bit(f, &idx);
         } else if (opId->id == MEM_REG_TO_MEM_REG || opId->id == ADD_REG || opId->id == SUB_REG || opId->id == CMP_REG) {
             fseek(f, idx, SEEK_SET);
             RegToRegOperation* op = malloc(sizeof(RegToRegOperation));
@@ -337,22 +380,16 @@ int main(int argc, char* argv[]) {
                 case 15:
                 case 1:
                     {
-
                         fseek(f, idx, SEEK_SET);
                         ImdToAccAddOperation* op = malloc(sizeof(ImdToAccAddOperation));
                         fread(op, sizeof(ImdToAccAddOperation), 1, f);
+                        char* opName = op->op_code == 11 ? SUB: op->op_code == 15 ? CMP : ADD;
                         idx += sizeof(ImdToAccAddOperation);
-
-                        int data = 0;
-                        char* opName = op->op_code == 11 ? "sub": op->op_code == 15 ? "cmp" : "add";
-                        if (op->w == 1) {
-                            data = read16Bit(f, &idx);
-                            printf("%s ax, %d\n", opName,  data);
-                        } else {
-                            data = read8Bit(f, &idx);
-                            printf("%s al, %d\n", opName, data);
-                        }
-
+                        operation = multi_reference_operation(opName, idx, sizeof(ImdToRegOperation));
+                        operation->left->adrr = op->w == 1 ? AX: AL; 
+                        operation->left->type = Raw;
+                        operation->right->value = op->w == 1 ? read16Bit(f, &idx): read8Bit(f, &idx); 
+                        operation->right->type = Value;
                     }
                     break;
                 case 32:
@@ -360,17 +397,14 @@ int main(int argc, char* argv[]) {
                         fseek(f, idx, SEEK_SET);
                         ImdToRegMemAddOperation* op = malloc(sizeof(ImdToRegMemAddOperation));
                         fread(op, sizeof(ImdToRegMemAddOperation), 1, f);
+                        int startIdx = idx;
                         idx += sizeof(ImdToRegMemAddOperation);
 
-                        Displacement disp = read_displacement(op->mod, op->rm, f, &idx);
+                        Displacement* disp = read_displacement_ptr(op->mod, op->rm, f, &idx);
 
-                        char* prefix = "";
+                        char* prefix = NULL;
                         if (op->mod != 3) {
-                            if (op->s == op->w && op->w) {
-                                prefix = "word";
-                            } else {
-                                prefix = "byte ";
-                            }
+                            prefix =  op->s == op->w && op->w ? word: byte;
                         }
 
                         int data = 0;
@@ -381,33 +415,24 @@ int main(int argc, char* argv[]) {
                         }
 
                         DEBUG("mod: %d math_code:%d s:%d rm: %d w: %d\n", op->mod, op->math_code, op->s, op->rm, op->w);
-                        char* opName = op->math_code == 7 ? "cmp": op->math_code == 5 ? "sub": "add";
-                        if (op->mod == 1) {
-                            char* dest = arr1[op->rm][op->w];
-                            if (disp.value != 0) {
-                                printf("%s [%s%s], %d\n", opName, dest, disp.label, data);
-                            } else {
-                                printf("%s %s, %d\n", opName, dest, data);
-                            }
+                        char* opName = op->math_code == 7 ? CMP: op->math_code == 5 ? SUB: ADD;
+                        operation = multi_reference_operation(opName, idx, sizeof(ImdToRegMemAddOperation));
+                        operation->right->type = Value;
+                        operation->right->value = data;
+                        bool isRawReg = op->mod == 3;
+                        if (isRawReg) {
+                            operation->left->adrr = arr[op->rm][op->w];;
+                            operation->left->type = Raw;
+                            operation->left->disp = disp;
                         } else {
-                            bool isRawReg = op->mod == 3;
-                            if (isRawReg)  {
-                                char* dest = arr[op->rm][op->w];
-                                if (disp.value != 0) {
-                                    printf("%s [%s%s], %d\n", opName, dest, disp.label, data);
-                                } else {
-                                    printf("%s %s, %d\n", opName, dest, data);
-                                }
-                            } else {
-                                char* dest = arr1[op->rm][op->w];
-                                if (op->rm == 6) {
-                                    printf("%s %s [%d], %d\n", opName, prefix, disp.value, data);
-                                } else {
-                                    printf("%s %s [%s%s], %d\n", opName, prefix, dest, disp.label , data);
-                                }
-                            }
+                            bool isDirectAccess = op->rm == 6;
+                            operation->left->prefix = prefix;
+                            operation->left->adrr = isDirectAccess ? NULL : arr1[op->rm][op->w];;
+                            operation->left->value = disp->value;
+                            operation->left->type = isDirectAccess ? DirectAccess : Expression;
+                            operation->left->disp = disp;
                         }
-                        if (disp.value) free(disp.label);
+//if (disp.value) free(disp.label);
                     }
                     break;
                 case 34:
@@ -548,6 +573,18 @@ int main(int argc, char* argv[]) {
             printf("Add \n");
         } else {
             idx += sizeof(RegToRegOperation);
+        }
+        if (operation != NULL) {
+            if (initial == NULL) {
+                initial = operation;
+                current = operation;
+            } else {
+                Operation* last = current;
+                last->next = operation;
+                operation->previous = last;
+                current = operation;
+            }
+            render_op(operation);
         }
     }
     free(op);
