@@ -1,8 +1,8 @@
 #!/bin/sh
 
 
-asm_files=$(ls test-cases/*.asm)
-gcc ./8086.c
+asm_files=$(ls test-cases-decode/*.asm)
+gcc ./8086dec.c
 
 for file in $asm_files; do
     t=$(mktemp)

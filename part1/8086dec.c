@@ -116,6 +116,19 @@ typedef struct AccumulatorToMemory  {
     unsigned int addr: 16;
 } AccumulatorToMemory;
 
+typedef struct CondJMPOP {
+    int unsigned op_code: 8;
+
+    int value: 8;
+} CondJMPOP;
+
+typedef struct JMPOp {
+    int unsigned op_code: 6;
+    int unsigned size: 1;
+    int unsigned pad: 1;
+} JMPOp;
+
+
 #pragma pack(pop)
 
 char* arr[][2] = {
@@ -153,6 +166,8 @@ const int ACC_TO_MEMORY_FLAG = 1;
 const int IMMEDIATE_TO_REG = 11; // 1011
 const int IMD_TO_MEM_REG = 12; // 1100
                                //
+const int JMP = 14;
+const int COND_JMP = 7;
                                //
 
 #define DEBUG(pattern, ...) if (argv[2] != NULL && argv[2][0] == 'D') { printf(pattern, __VA_ARGS__); }
@@ -301,33 +316,33 @@ int main(int argc, char* argv[]) {
                         }
 
                         DEBUG("mod: %d math_code:%d s:%d rm: %d w: %d\n", op->mod, op->math_code, op->s, op->rm, op->w);
-                        // printf("add %s, %d\n", dest, data);
                         char* opName = op->math_code == 7 ? "cmp": op->math_code == 5 ? "sub": "add";
                         if (op->mod == 1) {
-                                char* dest = arr1[op->rm][op->w];
+                            char* dest = arr1[op->rm][op->w];
+                            if (disp.value != 0) {
+                                printf("%s [%s%s], %d\n", opName, dest, disp.label, data);
+                            } else {
+                                printf("%s %s, %d\n", opName, dest, data);
+                            }
+                        } else {
+                            bool isRawReg = op->mod == 3;
+                            if (isRawReg)  {
+                                char* dest = arr[op->rm][op->w];
                                 if (disp.value != 0) {
                                     printf("%s [%s%s], %d\n", opName, dest, disp.label, data);
                                 } else {
                                     printf("%s %s, %d\n", opName, dest, data);
                                 }
                             } else {
-                                bool isRawReg = op->mod == 3;
-                                if (isRawReg)  {
-                                    char* dest = arr[op->rm][op->w];
-                                    if (disp.value != 0) {
-                                        printf("%s [%s%s], %d\n", opName, dest, disp.label, data);
-                                    } else {
-                                        printf("%s %s, %d\n", opName, dest, data);
-                                    }
+                                char* dest = arr1[op->rm][op->w];
+                                if (op->rm == 6) {
+                                    printf("%s %s [%d], %d\n", opName, prefix, disp.value, data);
                                 } else {
-                                    char* dest = arr1[op->rm][op->w];
-                                    if (op->rm == 6) {
-                                        printf("%s %s [%d], %d\n", opName, prefix, disp.value, data);
-                                    } else {
-                                        printf("%s %s [%s%s], %d\n", opName, prefix, dest, disp.label , data);
-                                    }
+                                    printf("%s %s [%s%s], %d\n", opName, prefix, dest, disp.label , data);
                                 }
                             }
+                        }
+                        if (disp.value) free(disp.label);
                     }
                     break;
                 case 34:
@@ -345,6 +360,7 @@ int main(int argc, char* argv[]) {
                         } else  {
                             Displacement disp = read_displacement(op->mod, op->rm, f, &idx);
                             bool isTargetMemoryWrite = op->d == 0 ;
+                            bool isDirectAccess = op->rm == 6 && op->mod == 0;
 
                             if (op->mod == 1) {
                                 char* src = arr[op->reg][op->w];
@@ -361,7 +377,11 @@ int main(int argc, char* argv[]) {
                                 char* str = arr1[op->rm][op->mod];
                                 char* dest = arr[(op->d == 0 || (op->mod == 0)) ? op->reg: op->rm][op->w];
                                 if (isTargetMemoryWrite)  {
-                                    printf("%s [%s%s], %s\n", opName, str, disp.label, dest);
+                                    if (isDirectAccess) {
+                                        printf("%s [%d], %s\n", opName, disp.value, dest);
+                                    } else {
+                                        printf("%s [%s%s], %s\n", opName, str, disp.label, dest);
+                                    }
                                 } else {
                                     if (op->rm == 6 && op->mod == 0) {
                                         printf("%s %s, [%d]\n", opName, dest, disp.value);
@@ -370,6 +390,7 @@ int main(int argc, char* argv[]) {
                                     }
                                 }
                             }
+                            if (disp.value) free(disp.label);
                         }
                     }
                     break;
@@ -423,6 +444,47 @@ int main(int argc, char* argv[]) {
                 printf("mov [%d], ax\n", op->addr);
             }
 
+        } else if (opId->id == JMP) {
+            fseek(f, idx, SEEK_SET);
+            JMPOp* jumpOp = malloc(sizeof(JMPOp));
+            fread(jumpOp, sizeof(JMPOp), 1, f);
+            idx += sizeof(JMPOp);
+
+            int ipinc = 0;
+            if (jumpOp->size == 1) {
+                // 8 bit data
+                ipinc = read8Bit(f);
+                idx+= sizeof(ByteData);
+            } else {
+                // 16 bit data
+                ipinc = read16Bit(f);
+                idx+= sizeof(DoubleByteData);
+            }
+            printf("JMP %d \n", ipinc);
+
+        } else if (opId->id == COND_JMP) {
+            char* opName = "";
+            fseek(f, idx, SEEK_SET);
+            CondJMPOP* jumpOp = malloc(sizeof(CondJMPOP));
+            fread(jumpOp, sizeof(CondJMPOP), 1, f);
+            idx += sizeof(CondJMPOP);
+            DEBUG("code: %d \n", jumpOp->op_code);
+            switch (jumpOp->op_code) {
+                case 125: opName = "jnge"; break;
+                case 128: opName = "jng"; break;
+                case 114: opName = "jnae"; break;
+                case 118: opName = "jna"; break;
+                case 122: opName = "jpe"; break;
+                case 112: opName = "jo"; break;
+                case 117: opName = "jnz"; break;
+                case 120: opName = "js"; break;
+                case 126: opName = "jge"; break;
+                case 129: opName = "jg"; break;
+                case 115: opName = "jae"; break;
+                case 119: opName = "jnp"; break;
+                case 113: opName = "jno"; break;
+            }
+            printf("%s %d \n", opName, jumpOp->value);
         } else if (opId->id == 0) {
             printf("Add \n");
         } else {
