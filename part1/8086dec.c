@@ -172,17 +172,19 @@ const int COND_JMP = 7;
 
 #define DEBUG(pattern, ...) if (argv[2] != NULL && argv[2][0] == 'D') { printf(pattern, __VA_ARGS__); }
 
-int read16Bit(FILE* f) {
+int read16Bit(FILE* f, int* idx) {
     DoubleByteData* data = malloc(sizeof(DoubleByteData));
     fread(data, sizeof(DoubleByteData), 1, f);
     int value = data->value;
+    (*idx) += sizeof(DoubleByteData);
     free(data);
     return value;
 }
 
-int read8Bit(FILE* f) {
+int read8Bit(FILE* f, int* idx) {
     ByteData* data = malloc(sizeof(ByteData));
     fread(data, sizeof(ByteData), 1, f);
+    (*idx) += sizeof(ByteData);
     int value = data->value;
     free(data);
     return value;
@@ -198,11 +200,9 @@ char* empty = "";
 Displacement read_displacement(int mod, int rm, FILE* f, int* idx) {
     int value = 0;
     if (mod == 1) {
-        value = read8Bit(f);
-        (*idx) += sizeof(ByteData);
+        value = read8Bit(f, idx);
     } else if (mod == 2 || (mod == 0 && rm == 6)) {
-        value = read16Bit(f);
-        (*idx) += sizeof(DoubleByteData);
+        value = read16Bit(f, idx);
     }
     char* disp = malloc(sizeof(char) * 100);
     if (value != 0 && value > 0) {
@@ -218,6 +218,19 @@ Displacement read_displacement(int mod, int rm, FILE* f, int* idx) {
     Displacement d = { .value = 0, .label = empty };
     return d;
 }
+
+enum ReferenceType {
+    DirectAccess,
+    Expression,
+    Value
+};
+
+typedef struct {
+    char* adrr;
+    Displacement disp;
+    int value;
+    enum ReferenceType type;
+} Reference;
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -249,12 +262,10 @@ int main(int argc, char* argv[]) {
             char* destination = arr[regOp->reg][regOp->w];
             if (regOp->w) {
                 fseek(f, idx, SEEK_SET);
-                idx += sizeof(DoubleByteData);
-                printf("mov %s, %d\n", destination, read16Bit(f));
+                printf("mov %s, %d\n", destination, read16Bit(f, &idx));
             } else {
                 fseek(f, idx, SEEK_SET);
-                idx += sizeof(ByteData);
-                printf("mov %s, %d\n", destination, read8Bit(f));
+                printf("mov %s, %d\n", destination, read8Bit(f, &idx));
             }
 
         } else if (opId->id == MEM_REG_TO_MEM_REG || opId->id == ADD_REG || opId->id == SUB_REG || opId->id == CMP_REG) {
@@ -277,12 +288,10 @@ int main(int argc, char* argv[]) {
                         int data = 0;
                         char* opName = op->op_code == 11 ? "sub": op->op_code == 15 ? "cmp" : "add";
                         if (op->w == 1) {
-                            data = read16Bit(f);
-                            idx+= sizeof(DoubleByteData);
+                            data = read16Bit(f, &idx);
                             printf("%s ax, %d\n", opName,  data);
                         } else {
-                            data = read8Bit(f);
-                            idx+= sizeof(ByteData);
+                            data = read8Bit(f, &idx);
                             printf("%s al, %d\n", opName, data);
                         }
 
@@ -308,11 +317,9 @@ int main(int argc, char* argv[]) {
 
                         int data = 0;
                         if (op->s == 1 && op->w != 1) {
-                            data = read16Bit(f);
-                            idx+= sizeof(DoubleByteData);
+                            data = read16Bit(f, &idx);
                         } else {
-                            data = read8Bit(f);
-                            idx+= sizeof(ByteData);
+                            data = read8Bit(f, &idx);
                         }
 
                         DEBUG("mod: %d math_code:%d s:%d rm: %d w: %d\n", op->mod, op->math_code, op->s, op->rm, op->w);
@@ -409,13 +416,11 @@ int main(int argc, char* argv[]) {
             char* prefix = NULL;
             if (op->w == 0) {
                 // 8 bit data
-                data = read8Bit(f);
-                idx+= sizeof(ByteData);
+                data = read8Bit(f, &idx);
                 prefix = "byte";
             } else {
                 // 16 bit data
-                data = read16Bit(f);
-                idx+= sizeof(DoubleByteData);
+                data = read16Bit(f, &idx);
                 prefix = "word";
             }
 
@@ -452,13 +457,9 @@ int main(int argc, char* argv[]) {
 
             int ipinc = 0;
             if (jumpOp->size == 1) {
-                // 8 bit data
-                ipinc = read8Bit(f);
-                idx+= sizeof(ByteData);
+                ipinc = read8Bit(f, &idx);
             } else {
-                // 16 bit data
-                ipinc = read16Bit(f);
-                idx+= sizeof(DoubleByteData);
+                ipinc = read16Bit(f, &idx);
             }
             printf("JMP %d \n", ipinc);
 
