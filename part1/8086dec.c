@@ -1,6 +1,7 @@
 #include "stdio.h"
 #include "stdlib.h"
 #include "stdbool.h"
+#include <time.h>
 /**
  * Instructions vary from 1 to 6 bytes in length.
  * The important part of the decoding is in the first 2 bytes.
@@ -222,15 +223,73 @@ Displacement read_displacement(int mod, int rm, FILE* f, int* idx) {
 enum ReferenceType {
     DirectAccess,
     Expression,
+    Raw,
     Value
 };
 
+char* MOV = "mov";
+
 typedef struct {
     char* adrr;
-    Displacement disp;
+    Displacement* disp;
     int value;
     enum ReferenceType type;
 } Reference;
+
+typedef struct Operation {
+    char* name;
+    struct Operation* previous;
+    struct Operation* next;
+    int currentIdx;
+    int size;
+    Reference* left;
+    Reference* right;
+} Operation;
+
+
+Operation* multi_reference_operation(char* opName, int idx) {
+    Operation* op = malloc(sizeof(Operation));
+    op->name = opName;
+    op->currentIdx = idx;
+    Reference* left = malloc(sizeof(Reference));
+    op->left = left;
+    Reference* right = malloc(sizeof(Reference));
+    op->right = right;
+    return op;
+}
+
+char* render_reference(Reference* ref) {
+    char* str = malloc(sizeof(char) * 30);
+    switch (ref->type) {
+        case Value:
+            sprintf(str,"%d", ref->value);
+            break;
+        case DirectAccess:
+            sprintf(str,"[%d]", ref->value);
+            break;
+        case Raw:
+            sprintf(str,"%s", ref->adrr);
+            break;
+        case Expression:
+            {
+                if (ref->disp != NULL) {
+                    sprintf(str,"[%s%s]", ref->adrr, ref->disp->label);
+                } else {
+                    sprintf(str,"[%s]", ref->adrr);
+                }
+            }
+    }
+    return str;
+}
+
+void render_op(Operation* op) {
+    // memory leak
+    if (op->right) {
+        printf("%s %s, %s\n", op->name, render_reference(op->left), render_reference(op->right));
+    } else {
+        printf("%s %s\n", op->name, render_reference(op->left));
+    }
+}
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
@@ -257,16 +316,15 @@ int main(int argc, char* argv[]) {
             int size = sizeof(ImdToRegOperation);
             ImdToRegOperation* regOp = malloc(size);
             fread(regOp, size, 1, f);
+            Operation* op = multi_reference_operation(MOV, idx);
             idx += sizeof(ImdToRegOperation);
 
             char* destination = arr[regOp->reg][regOp->w];
-            if (regOp->w) {
-                fseek(f, idx, SEEK_SET);
-                printf("mov %s, %d\n", destination, read16Bit(f, &idx));
-            } else {
-                fseek(f, idx, SEEK_SET);
-                printf("mov %s, %d\n", destination, read8Bit(f, &idx));
-            }
+            op->left->adrr = destination;
+            op->left->type = Raw;
+            op->right->type = Value;
+            op->right->value = regOp->w ? read16Bit(f, &idx): read8Bit(f, &idx);
+            render_op(op);
 
         } else if (opId->id == MEM_REG_TO_MEM_REG || opId->id == ADD_REG || opId->id == SUB_REG || opId->id == CMP_REG) {
             fseek(f, idx, SEEK_SET);
