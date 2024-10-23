@@ -217,28 +217,6 @@ Displacement* read_displacement_ptr(int mod, int rm, FILE* f, int* idx) {
     return dispStr;
 }
 
-Displacement read_displacement(int mod, int rm, FILE* f, int* idx) {
-    int value = 0;
-    if (mod == 1) {
-        value = read8Bit(f, idx);
-    } else if (mod == 2 || (mod == 0 && rm == 6)) {
-        value = read16Bit(f, idx);
-    }
-    char* disp = malloc(sizeof(char) * 100);
-    if (value != 0 && value > 0) {
-        sprintf(disp, " + %d", value);
-        Displacement d = { .value = value, .label = disp };
-        return d;
-    } else if (value < 0) {
-        sprintf(disp, " - %d", abs(value));
-        Displacement d = { .value = value, .label = disp };
-        return d;
-    }
-    free(disp);
-    Displacement d = { .value = 0, .label = empty };
-    return d;
-}
-
 enum ReferenceType {
     DirectAccess,
     Expression,
@@ -250,11 +228,12 @@ char* MOV = "mov";
 char* SUB = "sub";
 char* ADD = "add";
 char* CMP = "cmp";
+char* JMP_LABEL = "jmp";
 char* AX = "ax";
 char* AL = "al";
 
 typedef struct {
-    char* adrr;
+    char* addr;
     char* prefix;
     Displacement* disp;
     int value;
@@ -271,7 +250,28 @@ typedef struct Operation {
     Reference* right;
 } Operation;
 
+typedef struct JumpLabel {
+    int idx;
+    int offset;
+    struct JumpLabel* next;
+} JumpLabel;
 
+
+Operation* double_raw_operation(char* opName, int idx, int size, char* leftReg, char* rightReg) {
+    Operation* op = malloc(sizeof(Operation));
+    op->name = opName;
+    op->currentIdx = idx - size;
+    op->size = size;
+    Reference* left = malloc(sizeof(Reference));
+    op->left = left;
+    left->addr = leftReg;
+    left->type = Raw;
+    Reference* right = malloc(sizeof(Reference));
+    op->right = right;
+    right->addr = rightReg;
+    right->type = Raw;
+    return op;
+}
 Operation* multi_reference_operation(char* opName, int idx, int size) {
     Operation* op = malloc(sizeof(Operation));
     op->name = opName;
@@ -284,6 +284,16 @@ Operation* multi_reference_operation(char* opName, int idx, int size) {
     return op;
 }
 
+Operation* jmp_operation(int data, int idx, int size) {
+    Operation* op = malloc(sizeof(Operation));
+    op->name = JMP_LABEL;
+    op->currentIdx = idx - size;
+    op->size = size;
+    Reference* left = malloc(sizeof(Reference));
+    op->left = left;
+    return op;
+}
+
 char* word = "word";
 char* byte = "byte";
 
@@ -291,7 +301,11 @@ char* render_reference(Reference* ref) {
     char* str = malloc(sizeof(char) * 30);
     switch (ref->type) {
         case Value:
-            sprintf(str,"%d", ref->value);
+            if (ref->prefix != NULL) {
+                sprintf(str,"%s %d", ref->prefix, ref->value);
+            } else {
+                sprintf(str,"%d", ref->value);
+            }
             break;
         case DirectAccess:
             {
@@ -303,21 +317,21 @@ char* render_reference(Reference* ref) {
             }
             break;
         case Raw:
-            sprintf(str,"%s", ref->adrr);
+            sprintf(str,"%s", ref->addr);
             break;
         case Expression:
             {
-                if (ref->disp != NULL && ref->disp->value > 0) {
+                if (ref->disp != NULL && ref->disp->value != 0) {
                     if (ref->prefix != NULL) {
-                        sprintf(str,"%s [%s%s]", ref->prefix, ref->adrr, ref->disp->label);
+                        sprintf(str,"%s [%s%s]", ref->prefix, ref->addr, ref->disp->label);
                     } else {
-                        sprintf(str,"[%s%s]", ref->adrr, ref->disp->label);
+                        sprintf(str,"[%s%s]", ref->addr, ref->disp->label);
                     }
                 } else {
                     if (ref->prefix != NULL) {
-                        sprintf(str,"%s [%s]", ref->prefix, ref->adrr);
+                        sprintf(str,"%s [%s]", ref->prefix, ref->addr);
                     } else {
-                        sprintf(str,"[%s]", ref->adrr);
+                        sprintf(str,"[%s]", ref->addr);
                     }
                 }
             }
@@ -332,6 +346,18 @@ void render_op(Operation* op) {
     } else {
         printf("%s %s\n", op->name, render_reference(op->left));
     }
+}
+
+// Linear search :pepege:
+JumpLabel* find_possible_jump_for_location(JumpLabel* initial, int idx) {
+    JumpLabel* itercur = initial;
+    while (itercur != NULL) {
+        if (itercur->idx == idx) {
+            return itercur;
+        }
+        itercur = itercur->next;
+    }
+    return NULL;
 }
 
 int main(int argc, char* argv[]) {
@@ -349,6 +375,8 @@ int main(int argc, char* argv[]) {
     int idx = 0;
     Operation* initial = NULL;
     Operation* current = NULL;
+    JumpLabel* initialJmp = NULL;
+    JumpLabel* currentJmp = NULL;
     while (fread(opId, sizeof(OpIdentifier), 1, f)) {
         Operation* operation = NULL;
         DEBUG("opId: %d\n", opId->id);
@@ -362,10 +390,10 @@ int main(int argc, char* argv[]) {
             ImdToRegOperation* regOp = malloc(size);
             fread(regOp, size, 1, f);
             idx += sizeof(ImdToRegOperation);
-            operation = multi_reference_operation(MOV, idx, sizeof(ImdToRegOperation));
+            operation = multi_reference_operation(MOV, idx, sizeof(ImdToRegOperation) + (regOp->w ? 2 : 1));
 
             char* destination = arr[regOp->reg][regOp->w];
-            operation->left->adrr = destination;
+            operation->left->addr = destination;
             operation->left->type = Raw;
             operation->right->type = Value;
             operation->right->value = regOp->w ? read16Bit(f, &idx): read8Bit(f, &idx);
@@ -385,8 +413,8 @@ int main(int argc, char* argv[]) {
                         fread(op, sizeof(ImdToAccAddOperation), 1, f);
                         char* opName = op->op_code == 11 ? SUB: op->op_code == 15 ? CMP : ADD;
                         idx += sizeof(ImdToAccAddOperation);
-                        operation = multi_reference_operation(opName, idx, sizeof(ImdToRegOperation));
-                        operation->left->adrr = op->w == 1 ? AX: AL; 
+                        operation = multi_reference_operation(opName, idx, sizeof(ImdToRegOperation) + (op->w == 1 ? 2: 1));
+                        operation->left->addr = op->w == 1 ? AX: AL; 
                         operation->left->type = Raw;
                         operation->right->value = op->w == 1 ? read16Bit(f, &idx): read8Bit(f, &idx); 
                         operation->right->type = Value;
@@ -397,7 +425,6 @@ int main(int argc, char* argv[]) {
                         fseek(f, idx, SEEK_SET);
                         ImdToRegMemAddOperation* op = malloc(sizeof(ImdToRegMemAddOperation));
                         fread(op, sizeof(ImdToRegMemAddOperation), 1, f);
-                        int startIdx = idx;
                         idx += sizeof(ImdToRegMemAddOperation);
 
                         Displacement* disp = read_displacement_ptr(op->mod, op->rm, f, &idx);
@@ -421,18 +448,17 @@ int main(int argc, char* argv[]) {
                         operation->right->value = data;
                         bool isRawReg = op->mod == 3;
                         if (isRawReg) {
-                            operation->left->adrr = arr[op->rm][op->w];;
+                            operation->left->addr = arr[op->rm][op->w];;
                             operation->left->type = Raw;
                             operation->left->disp = disp;
                         } else {
                             bool isDirectAccess = op->rm == 6;
                             operation->left->prefix = prefix;
-                            operation->left->adrr = isDirectAccess ? NULL : arr1[op->rm][op->w];;
+                            operation->left->addr = isDirectAccess ? NULL : arr1[op->rm][op->w];;
                             operation->left->value = disp->value;
                             operation->left->type = isDirectAccess ? DirectAccess : Expression;
                             operation->left->disp = disp;
                         }
-//if (disp.value) free(disp.label);
                     }
                     break;
                 case 34:
@@ -441,46 +467,49 @@ int main(int argc, char* argv[]) {
                 case 14:
                     {
                         idx += sizeof(RegToRegOperation);
-                        char* opName = op->op_code == 34 ? "mov": op->op_code == 10? "sub": op->op_code == 14 ? "cmp": "add";
+                        char* opName = op->op_code == 34 ? MOV: op->op_code == 10? SUB: op->op_code == 14 ? CMP: ADD;
                         DEBUG("cmd: %s mod: %d rm: %d reg: %d w: %d d: %d\n", opName, op->mod, op->rm, op->reg, op->w, op->d);
                         if (op->mod == 3) {
                             char* destination = arr[op->d == 1 ? op->reg : op->rm][op->w];
                             char* source = arr[op->d == 1 ? op->rm : op->reg][op->w];
-                            printf("%s %s, %s\n", opName, destination, source);
+                            operation = double_raw_operation(opName, idx, sizeof(RegToRegOperation), destination, source);
                         } else  {
-                            Displacement disp = read_displacement(op->mod, op->rm, f, &idx);
+                            int i = idx;
+                            Displacement* disp = read_displacement_ptr(op->mod, op->rm, f, &idx);
                             bool isTargetMemoryWrite = op->d == 0 ;
-                            bool isDirectAccess = op->rm == 6 && op->mod == 0;
+                            operation = multi_reference_operation(opName, idx, sizeof(RegToRegOperation) + i - idx);
 
                             if (op->mod == 1) {
-                                char* src = arr[op->reg][op->w];
-                                char* dest = arr1[op->rm][op->w];
+                                char* dest = arr[op->reg][op->w];
+                                char* src = arr1[op->rm][op->w];
                                 if (op->rm == 6 && op->w == 0) {
-                                    dest = arr[op->reg][1];
+                                    src = arr[op->reg][1];
                                 }
-                                if (op->d != 1)  {
-                                    printf("%s [%s%s], %s\n", opName, dest, disp.label, src);
-                                } else {
-                                    printf("%s %s, [%s%s]\n", opName, src, dest, disp.label);
-                                }
+                                operation->left->type = Raw;
+                                operation->left->addr = dest;
+                                operation->right->type = Expression;
+                                operation->right->addr = src;
+                                operation->right->disp = disp;
                             } else {
                                 char* str = arr1[op->rm][op->mod];
                                 char* dest = arr[(op->d == 0 || (op->mod == 0)) ? op->reg: op->rm][op->w];
-                                if (isTargetMemoryWrite)  {
-                                    if (isDirectAccess) {
-                                        printf("%s [%d], %s\n", opName, disp.value, dest);
-                                    } else {
-                                        printf("%s [%s%s], %s\n", opName, str, disp.label, dest);
-                                    }
+                                operation->left->addr = dest;
+                                operation->left->type = Raw;
+                                if (op->rm == 6 && op->mod == 0) {
+                                    operation->right->type = DirectAccess;
+                                    operation->right->value = disp->value;
                                 } else {
-                                    if (op->rm == 6 && op->mod == 0) {
-                                        printf("%s %s, [%d]\n", opName, dest, disp.value);
-                                    } else {
-                                        printf("%s %s, [%s%s]\n", opName, dest, str, disp.label);
-                                    }
+                                    operation->right->disp = disp;
+                                    operation->right->type = Expression;
+                                    operation->right->addr = str;
                                 }
                             }
-                            if (disp.value) free(disp.label);
+                            if (isTargetMemoryWrite)  {
+                                Reference* suposedLeft = operation->left;
+                                Reference* suposedRight = operation->right;
+                                operation->left = suposedRight;
+                                operation->right = suposedLeft;
+                            }
                         }
                     }
                     break;
@@ -493,43 +522,54 @@ int main(int argc, char* argv[]) {
             ImdToRegMemOperation* op = malloc(sizeof(ImdToRegMemOperation));
             fread(op, sizeof(ImdToRegMemOperation), 1, f);
             idx += sizeof(ImdToRegMemOperation);
-            Displacement disp = read_displacement(op->mod, op->rm, f, &idx); 
+            Displacement* disp = read_displacement_ptr(op->mod, op->rm, f, &idx); 
 
             int data = 0;
             char* prefix = NULL;
             if (op->w == 0) {
-                // 8 bit data
                 data = read8Bit(f, &idx);
                 prefix = "byte";
             } else {
-                // 16 bit data
                 data = read16Bit(f, &idx);
                 prefix = "word";
             }
 
             DEBUG("mod: %d rm: %d w: %d\n", op->mod, op->rm, op->w);
+            operation = multi_reference_operation(MOV, idx, sizeof(ImdToRegMemOperation));
+            operation->right->type = Value;
+            operation->right->prefix = prefix;
+            operation->right->value = data;
             if (op->mod == 3)
             {
-                char* dest = arr[op->rm][op->w];
-                printf("mov %s, %s %d\n", dest, prefix, data);
+                operation->left->type = Raw;
+                operation->left->addr = arr[op->rm][op->w];
+                operation->left->addr = arr[op->rm][op->w];
             }
             else
             {
-                char* dest = arr1[op->rm][op->w];
-                printf("mov [%s%s], %s %d\n", dest, disp.label, prefix, data);
+                operation->left->type = Expression;
+                operation->left->addr = arr1[op->rm][op->w];;
+                operation->left->disp = disp;
             }
         } else if (opId->id == ACC_TO_MEMORY) {
             fseek(f, idx, SEEK_SET);
             AccumulatorToMemory* op = malloc(sizeof(AccumulatorToMemory));
             fread(op, sizeof(AccumulatorToMemory), 1, f);
             idx += sizeof(AccumulatorToMemory);
+            operation = multi_reference_operation(MOV, idx, sizeof(AccumulatorToMemory));
             if (op->order == MEMORY_TO_ACC_FLAG)
             {
-                printf("mov ax, [%d]\n", op->addr);
+                operation->left->type = Raw;
+                operation->left->addr = AX;
+                operation->right->type = DirectAccess;
+                operation->right->value = op->addr;
             }
             else
             {
-                printf("mov [%d], ax\n", op->addr);
+                operation->right->type = Raw;
+                operation->right->addr = AX;
+                operation->left->type = DirectAccess;
+                operation->left->value = op->addr;
             }
 
         } else if (opId->id == JMP) {
@@ -544,7 +584,18 @@ int main(int argc, char* argv[]) {
             } else {
                 ipinc = read16Bit(f, &idx);
             }
-            printf("JMP %d \n", ipinc);
+            JumpLabel* jmp = malloc(sizeof(JumpLabel));
+            jmp->offset = ipinc;
+            jmp->idx = (idx - sizeof(JMPOp) - (jumpOp->size == 1 ? 1: 2)) + ipinc + 2;
+            if (initialJmp == NULL) {
+                initialJmp = jmp;
+                currentJmp = jmp;
+            } else {
+                currentJmp->next = jmp;
+                currentJmp = jmp;
+            }
+
+            operation = jmp_operation(ipinc, idx, sizeof(JMPOp) + (jumpOp->size == 1 ? 1: 2));
 
         } else if (opId->id == COND_JMP) {
             char* opName = "";
@@ -584,8 +635,17 @@ int main(int argc, char* argv[]) {
                 operation->previous = last;
                 current = operation;
             }
-            render_op(operation);
         }
+    }
+
+    Operation* itercur = initial;
+    while (itercur != NULL) {
+        JumpLabel* label = find_possible_jump_for_location(initialJmp, itercur->currentIdx);
+        if (label != NULL) {
+            printf("label:\n");
+        }
+        render_op(itercur);
+        itercur = itercur->next;
     }
     free(op);
     free(opId);

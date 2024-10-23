@@ -1,7 +1,6 @@
+cmp bx, ax;
 test_label0:
-jnz test_label1
-cmp [245], bx
+jmp test_label1
 test_label1:
-cmp [32], bx
-jnz test_label0
+jmp test_label0
 
