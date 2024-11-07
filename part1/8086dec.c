@@ -124,9 +124,9 @@ typedef struct CondJMPOP {
 } CondJMPOP;
 
 typedef struct JMPOp {
-    int unsigned op_code: 6;
-    int unsigned size: 1;
     int unsigned pad: 1;
+    int unsigned size: 1;
+    int unsigned op_code: 6;
 } JMPOp;
 
 
@@ -169,7 +169,30 @@ const int IMD_TO_MEM_REG = 12; // 1100
                                //
 const int JMP = 14;
 const int COND_JMP = 7;
-                               //
+
+
+char* jnge = "jnge";
+char* jng = "jng";
+char* jnae = "jnae";
+char* jna = "jna";
+char* jpe = "jpe";
+char* jo = "jo";
+char* jnz = "jnz";
+char* js = "js";
+char* jge = "jge";
+char* jg = "jg";
+char* jz = "jz";
+char* jae = "jae";
+char* jnbe = "jnbe";
+char* jnp = "jnp";
+char* jno = "jno";
+char* jns = "jns";
+char* loop = "loop";
+char* loopz = "loopz";
+char* loopnz = "loopnz";
+char* jcxz = "jcxz";
+
+
 
 #define DEBUG(pattern, ...) if (argv[2] != NULL && argv[2][0] == 'D') { printf(pattern, __VA_ARGS__); }
 
@@ -253,6 +276,7 @@ typedef struct Operation {
 typedef struct JumpLabel {
     int idx;
     int offset;
+    char* label;
     struct JumpLabel* next;
 } JumpLabel;
 
@@ -284,13 +308,15 @@ Operation* multi_reference_operation(char* opName, int idx, int size) {
     return op;
 }
 
-Operation* jmp_operation(int data, int idx, int size) {
+Operation* jmp_operation(char* name, int data, int idx, int size, char* id) {
     Operation* op = malloc(sizeof(Operation));
-    op->name = JMP_LABEL;
+    op->name = name;
     op->currentIdx = idx - size;
     op->size = size;
     Reference* left = malloc(sizeof(Reference));
     op->left = left;
+    op->left->type = Raw;
+    op->left->addr = id;
     return op;
 }
 
@@ -375,8 +401,8 @@ int main(int argc, char* argv[]) {
     int idx = 0;
     Operation* initial = NULL;
     Operation* current = NULL;
-    JumpLabel* initialJmp = NULL;
-    JumpLabel* currentJmp = NULL;
+    JumpLabel* jmpMap[500] = {};
+    int jmpCount = 0;
     while (fread(opId, sizeof(OpIdentifier), 1, f)) {
         Operation* operation = NULL;
         DEBUG("opId: %d\n", opId->id);
@@ -577,25 +603,38 @@ int main(int argc, char* argv[]) {
             JMPOp* jumpOp = malloc(sizeof(JMPOp));
             fread(jumpOp, sizeof(JMPOp), 1, f);
             idx += sizeof(JMPOp);
-
             int ipinc = 0;
-            if (jumpOp->size == 1) {
-                ipinc = read8Bit(f, &idx);
-            } else {
-                ipinc = read16Bit(f, &idx);
-            }
-            JumpLabel* jmp = malloc(sizeof(JumpLabel));
-            jmp->offset = ipinc;
-            jmp->idx = (idx - sizeof(JMPOp) - (jumpOp->size == 1 ? 1: 2)) + ipinc + 2;
-            if (initialJmp == NULL) {
-                initialJmp = jmp;
-                currentJmp = jmp;
-            } else {
-                currentJmp->next = jmp;
-                currentJmp = jmp;
+            bool isConditional = jumpOp->op_code != 43;
+            // 16 bit?
+            ipinc = read8Bit(f, &idx);
+
+            char* opName = JMP_LABEL;
+            // printf("%d\n", jumpOp->op_code);
+            if (isConditional) {
+                if (jumpOp->size == 1) {
+                    opName = jumpOp->pad == 1 ? jcxz: loop;
+                } else {
+                    opName = jumpOp->pad == 1 ? loopz: loopnz;
+                }
             }
 
-            operation = jmp_operation(ipinc, idx, sizeof(JMPOp) + (jumpOp->size == 1 ? 1: 2));
+            // + 1 : 2 this jump logic is probably wrong
+            // int i = (idx - sizeof(JMPOp) - (jumpOp->size == 1 ? 1: 2)) + ipinc + (isConditional ? 1: 2);
+            int i = (idx - sizeof(JMPOp) - (isConditional ? 0 : jumpOp->size == 1 ? 1: 2)) + ipinc + (isConditional ? 1: 2);
+            JumpLabel* jmp = jmpMap[i];
+            if (jmp == NULL) {
+                jmp = malloc(sizeof(JumpLabel));
+                jmp->offset = ipinc;
+                jmp->idx = i;
+                char* label = malloc(sizeof(char) * 10);
+                sprintf(label, "label%d", jmpCount);
+                jmp->label = label;
+                jmpCount++;
+                jmpMap[i] = jmp;
+
+            }
+
+            operation = jmp_operation(opName, ipinc, idx, sizeof(JMPOp) + (jumpOp->size == 1 ? 1: 2), jmp->label);
 
         } else if (opId->id == COND_JMP) {
             char* opName = "";
@@ -605,23 +644,45 @@ int main(int argc, char* argv[]) {
             idx += sizeof(CondJMPOP);
             DEBUG("code: %d \n", jumpOp->op_code);
             switch (jumpOp->op_code) {
-                case 125: opName = "jnge"; break;
-                case 128: opName = "jng"; break;
-                case 114: opName = "jnae"; break;
-                case 118: opName = "jna"; break;
-                case 122: opName = "jpe"; break;
-                case 112: opName = "jo"; break;
-                case 117: opName = "jnz"; break;
-                case 120: opName = "js"; break;
-                case 126: opName = "jge"; break;
-                case 129: opName = "jg"; break;
-                case 115: opName = "jae"; break;
-                case 119: opName = "jnp"; break;
-                case 113: opName = "jno"; break;
+                case 124: opName = jnge; break;
+                case 126: opName = jng; break;
+                case 114: opName = jnae; break;
+                case 118: opName = jna; break;
+                case 122: opName = jpe; break;
+                case 112: opName = jo; break;
+                case 117: opName = jnz; break;
+                case 120: opName = js; break;
+                case 125: opName = jge; break;
+                case 127: opName = jg; break;
+                case 116: opName = jz; break;
+                case 115: opName = jae; break;
+                case 119: opName = jnbe; break;
+                case 123: opName = jnp; break;
+                case 113: opName = jno; break;
+                case 121: opName = jns; break;
+                case 225: opName = loop; break;
+                case 226: opName = loopz; break;
+                case 224: opName = loopnz; break;
+                case 227: opName = jcxz; break;
             }
-            printf("%s %d \n", opName, jumpOp->value);
+            int i = (idx - sizeof(CondJMPOP)) + jumpOp->value + 2;
+            JumpLabel* jmp = jmpMap[i];
+            if (jmp == NULL) {
+                jmp = malloc(sizeof(JumpLabel));
+                jmp->offset = jumpOp->value;
+                jmp->idx = idx;
+                char* label = malloc(sizeof(char) * 10);
+                sprintf(label, "label%d", jmpCount);
+                jmp->label = label;
+                jmpCount++;
+                jmpMap[i] = jmp;
+
+            }
+
+            operation = jmp_operation(opName, jumpOp->value, idx, sizeof(CondJMPOP), jmp->label);
+            DEBUG("idx: %d\n", jmp->idx);
         } else if (opId->id == 0) {
-            printf("Add \n");
+            DEBUG("Add \n", NULL);
         } else {
             idx += sizeof(RegToRegOperation);
         }
@@ -640,9 +701,9 @@ int main(int argc, char* argv[]) {
 
     Operation* itercur = initial;
     while (itercur != NULL) {
-        JumpLabel* label = find_possible_jump_for_location(initialJmp, itercur->currentIdx);
-        if (label != NULL) {
-            printf("label:\n");
+        JumpLabel* jmp = jmpMap[itercur->currentIdx];
+        if (jmp != NULL) {
+            printf("%s:\n", jmp->label);
         }
         render_op(itercur);
         itercur = itercur->next;

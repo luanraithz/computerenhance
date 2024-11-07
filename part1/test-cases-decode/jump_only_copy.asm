@@ -1,5 +1,7 @@
-jnz 2 
-jnz 252 
-jnz 250 
-jnz 252
+jnz label3 
+jnz label2 
+label3:
+jnz label2
+label2:
+cmp bx, ax
 
