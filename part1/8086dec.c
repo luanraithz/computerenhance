@@ -1,6 +1,9 @@
 #include "stdio.h"
+#include "stdint.h"
 #include "stdlib.h"
 #include "stdbool.h"
+#include <sys/stat.h>
+#include <string.h>
 #include <time.h>
 /**
  * Instructions vary from 1 to 6 bytes in length.
@@ -49,20 +52,6 @@ typedef struct RegToRegOperation {
 } RegToRegOperation;
 
 
-typedef struct ImdToRegOrMemOperation {
-    unsigned int w: 1;
-    unsigned int d: 1;
-    unsigned int op_code: 6;
-
-    unsigned int rm: 3;
-    unsigned int pad1: 3;
-    unsigned int mod: 2;
-
-    unsigned int data: 8;
-    unsigned int dataIfW: 8;
-
-} ImdToRegOrMemOperation;
-
 typedef struct ImdToRegOperation {
     unsigned int reg: 3;
     unsigned int w: 1;
@@ -95,19 +84,6 @@ typedef struct ImdToRegMemAddOperation {
     unsigned int math_code: 3; 
     MOD;
 } ImdToRegMemAddOperation;
-
-typedef struct ByteData {
-    int value: 8;
-} ByteData;
-
-typedef struct DoubleByteData {
-    int value: 16;
-} DoubleByteData;
-
-typedef struct OpIdentifier {
-    unsigned int pad: 4;
-    unsigned int id: 4;
-} OpIdentifier;
 
 typedef struct AccumulatorToMemory  {
     W;
@@ -193,40 +169,39 @@ char* loopnz = "loopnz";
 char* jcxz = "jcxz";
 
 
-
 #define DEBUG(pattern, ...) if (argv[2] != NULL && argv[2][0] == 'D') { printf(pattern, __VA_ARGS__); }
-
-int read16Bit(FILE* f, int* idx) {
-    DoubleByteData* data = malloc(sizeof(DoubleByteData));
-    fread(data, sizeof(DoubleByteData), 1, f);
-    int value = data->value;
-    (*idx) += sizeof(DoubleByteData);
-    free(data);
-    return value;
-}
-
-int read8Bit(FILE* f, int* idx) {
-    ByteData* data = malloc(sizeof(ByteData));
-    fread(data, sizeof(ByteData), 1, f);
-    (*idx) += sizeof(ByteData);
-    int value = data->value;
-    free(data);
-    return value;
-}
 
 typedef struct {
     int value;
     char* label;
+    int size;
 } Displacement;
 
 char* empty = "";
 
-Displacement* read_displacement_ptr(int mod, int rm, FILE* f, int* idx) {
+
+
+int read2Bytes(void* mem_start) {
+    int16_t value = 0;
+    memcpy(&value, mem_start, 2);
+    return value;
+}
+
+int readByte(void* mem_start) {
+    int8_t value = 0;
+    memcpy(&value, mem_start, 1);
+    return value;
+}
+
+Displacement* read_displacement_ptr(int mod, int rm, void* mem_start) {
     int value = 0;
+    int size = 0;
     if (mod == 1) {
-        value = read8Bit(f, idx);
+        value = readByte(mem_start);
+        size = 1;
     } else if (mod == 2 || (mod == 0 && rm == 6)) {
-        value = read16Bit(f, idx);
+        value = read2Bytes(mem_start);
+        size = 2 ;
     }
     char* disp = malloc(sizeof(char) * 100);
     Displacement* dispStr = malloc(sizeof(Displacement));
@@ -237,6 +212,7 @@ Displacement* read_displacement_ptr(int mod, int rm, FILE* f, int* idx) {
     }
     dispStr->value = value;
     dispStr->label = disp;
+    dispStr->size = size;
     return dispStr;
 }
 
@@ -284,7 +260,7 @@ typedef struct JumpLabel {
 Operation* double_raw_operation(char* opName, int idx, int size, char* leftReg, char* rightReg) {
     Operation* op = malloc(sizeof(Operation));
     op->name = opName;
-    op->currentIdx = idx - size;
+    op->currentIdx = idx;
     op->size = size;
     Reference* left = malloc(sizeof(Reference));
     op->left = left;
@@ -299,7 +275,7 @@ Operation* double_raw_operation(char* opName, int idx, int size, char* leftReg, 
 Operation* multi_reference_operation(char* opName, int idx, int size) {
     Operation* op = malloc(sizeof(Operation));
     op->name = opName;
-    op->currentIdx = idx - size;
+    op->currentIdx = idx;
     op->size = size;
     Reference* left = malloc(sizeof(Reference));
     op->left = left;
@@ -311,7 +287,7 @@ Operation* multi_reference_operation(char* opName, int idx, int size) {
 Operation* jmp_operation(char* name, int data, int idx, int size, char* id) {
     Operation* op = malloc(sizeof(Operation));
     op->name = name;
-    op->currentIdx = idx - size;
+    op->currentIdx = idx;
     op->size = size;
     Reference* left = malloc(sizeof(Reference));
     op->left = left;
@@ -386,74 +362,95 @@ JumpLabel* find_possible_jump_for_location(JumpLabel* initial, int idx) {
     return NULL;
 }
 
+
+typedef uint8_t u8;
+
+typedef struct Memory {
+    u8 data[1024 * 1024];
+} Memory;
+
+typedef int16_t i16;
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         printf("File is required\n");
         return 1; 
     }
-    FILE* f = fopen(argv[1], "rb");
-    if (f == NULL) {
-        printf("File not found\n");
-        return 1;
+    Memory* mem = malloc(sizeof(Memory));
+    int size = 0;
+    {
+        FILE* f = fopen(argv[1], "rb");
+        if (f == NULL) {
+            printf("File not found\n");
+            free(mem);
+            return 1;
+        }
+        fseek(f, 0l, SEEK_END);
+        size = ftell(f);
+        rewind(f);
+        fread(mem, size, 1, f);
+        fclose(f);
     }
-    RegToRegOperation *op = malloc(sizeof(RegToRegOperation));
-    OpIdentifier *opId = malloc(sizeof(OpIdentifier));
-    int idx = 0;
     Operation* initial = NULL;
     Operation* current = NULL;
-    JumpLabel* jmpMap[500] = {};
+    JumpLabel** jmpMap = calloc(1000, sizeof(JumpLabel*));
     int jmpCount = 0;
-    while (fread(opId, sizeof(OpIdentifier), 1, f)) {
+    int bytesRead = 0; 
+    for (int idx = 0; idx < size; idx+=bytesRead) {
+        u8 opName = mem->data[idx] >> 4;
+        bytesRead = 0;
         Operation* operation = NULL;
-        DEBUG("opId: %d\n", opId->id);
-        if (opId->id == 9) {
-            fseek(f, idx, SEEK_SET);
-            idx += sizeof(ImdToRegOrMemOperation);
-            printf("Memory to accumulator exp\n");
-        } else if (opId->id == IMMEDIATE_TO_REG) {
-            fseek(f, idx, SEEK_SET);
-            int size = sizeof(ImdToRegOperation);
-            ImdToRegOperation* regOp = malloc(size);
-            fread(regOp, size, 1, f);
-            idx += sizeof(ImdToRegOperation);
+        if (opName == IMMEDIATE_TO_REG) {
+            bytesRead = sizeof(ImdToRegOperation);
+            ImdToRegOperation* regOp = malloc(bytesRead);
+            memcpy(regOp, mem->data + idx, sizeof(ImdToRegOperation));
+
             operation = multi_reference_operation(MOV, idx, sizeof(ImdToRegOperation) + (regOp->w ? 2 : 1));
 
             char* destination = arr[regOp->reg][regOp->w];
             operation->left->addr = destination;
             operation->left->type = Raw;
             operation->right->type = Value;
-            operation->right->value = regOp->w ? read16Bit(f, &idx): read8Bit(f, &idx);
-        } else if (opId->id == MEM_REG_TO_MEM_REG || opId->id == ADD_REG || opId->id == SUB_REG || opId->id == CMP_REG) {
-            fseek(f, idx, SEEK_SET);
+            operation->right->value = regOp->w ? read2Bytes(mem->data+bytesRead+idx): readByte(mem->data+bytesRead+idx);
+            bytesRead+= regOp->w?2: 1;
+        } else if (opName == MEM_REG_TO_MEM_REG || opName == ADD_REG || opName == SUB_REG || opName == CMP_REG) {
             RegToRegOperation* op = malloc(sizeof(RegToRegOperation));
-            fread(op, sizeof(RegToRegOperation), 1, f);
-
+            DEBUG("idx: %d %d\n", idx, sizeof(RegToRegOperation));
+            memcpy(op, mem->data+idx, sizeof(RegToRegOperation));
+            bytesRead = 0;
             DEBUG("code: %d\n", op->op_code);
             switch (op->op_code) {
                 case 11:
                 case 15:
                 case 1:
                     {
-                        fseek(f, idx, SEEK_SET);
                         ImdToAccAddOperation* op = malloc(sizeof(ImdToAccAddOperation));
-                        fread(op, sizeof(ImdToAccAddOperation), 1, f);
+                        memcpy(op, mem->data + idx, sizeof(ImdToAccAddOperation));
                         char* opName = op->op_code == 11 ? SUB: op->op_code == 15 ? CMP : ADD;
-                        idx += sizeof(ImdToAccAddOperation);
+                        bytesRead += sizeof(ImdToAccAddOperation);
                         operation = multi_reference_operation(opName, idx, sizeof(ImdToRegOperation) + (op->w == 1 ? 2: 1));
                         operation->left->addr = op->w == 1 ? AX: AL; 
                         operation->left->type = Raw;
-                        operation->right->value = op->w == 1 ? read16Bit(f, &idx): read8Bit(f, &idx); 
+                        int value = 0;
+                        if (op->w == 1)  {
+                            value = read2Bytes(mem->data+bytesRead+idx);
+                        } else {
+                            value = readByte(mem->data+bytesRead+idx);
+                        }
+                        operation->right->value = value;
+
                         operation->right->type = Value;
+                        bytesRead+= op->w == 1 ? 2: 1;
                     }
                     break;
                 case 32:
                     {
-                        fseek(f, idx, SEEK_SET);
                         ImdToRegMemAddOperation* op = malloc(sizeof(ImdToRegMemAddOperation));
-                        fread(op, sizeof(ImdToRegMemAddOperation), 1, f);
-                        idx += sizeof(ImdToRegMemAddOperation);
+                        memcpy(op, mem->data+ idx, sizeof(ImdToRegMemAddOperation));
+                        bytesRead+=sizeof(ImdToRegMemAddOperation);
 
-                        Displacement* disp = read_displacement_ptr(op->mod, op->rm, f, &idx);
+                        Displacement* disp = read_displacement_ptr(op->mod, op->rm, mem->data + idx + bytesRead );
+                        bytesRead += disp->size;
 
                         char* prefix = NULL;
                         if (op->mod != 3) {
@@ -462,10 +459,12 @@ int main(int argc, char* argv[]) {
 
                         int data = 0;
                         if (op->s == 1 && op->w != 1) {
-                            data = read16Bit(f, &idx);
+                            data = read2Bytes(mem->data+idx+bytesRead);
+                            bytesRead++;
                         } else {
-                            data = read8Bit(f, &idx);
+                            data = readByte(mem->data+idx+bytesRead);
                         }
+                        bytesRead++;
 
                         DEBUG("mod: %d math_code:%d s:%d rm: %d w: %d\n", op->mod, op->math_code, op->s, op->rm, op->w);
                         char* opName = op->math_code == 7 ? CMP: op->math_code == 5 ? SUB: ADD;
@@ -492,7 +491,7 @@ int main(int argc, char* argv[]) {
                 case 0:
                 case 14:
                     {
-                        idx += sizeof(RegToRegOperation);
+                        bytesRead += sizeof(RegToRegOperation);
                         char* opName = op->op_code == 34 ? MOV: op->op_code == 10? SUB: op->op_code == 14 ? CMP: ADD;
                         DEBUG("cmd: %s mod: %d rm: %d reg: %d w: %d d: %d\n", opName, op->mod, op->rm, op->reg, op->w, op->d);
                         if (op->mod == 3) {
@@ -500,10 +499,11 @@ int main(int argc, char* argv[]) {
                             char* source = arr[op->d == 1 ? op->rm : op->reg][op->w];
                             operation = double_raw_operation(opName, idx, sizeof(RegToRegOperation), destination, source);
                         } else  {
-                            int i = idx;
-                            Displacement* disp = read_displacement_ptr(op->mod, op->rm, f, &idx);
+                            Displacement* disp = read_displacement_ptr(op->mod, op->rm, mem->data + idx + bytesRead);
+                            DEBUG("disp: %d\n", disp->value);
+                            bytesRead+= disp->size;
                             bool isTargetMemoryWrite = op->d == 0 ;
-                            operation = multi_reference_operation(opName, idx, sizeof(RegToRegOperation) + i - idx);
+                            operation = multi_reference_operation(opName, idx, sizeof(RegToRegOperation) + disp->size);
 
                             if (op->mod == 1) {
                                 char* dest = arr[op->reg][op->w];
@@ -540,25 +540,28 @@ int main(int argc, char* argv[]) {
                     }
                     break;
                 default:
-                      idx += sizeof(RegToRegOperation);
+                      bytesRead += sizeof(RegToRegOperation);
                       DEBUG("Operation not handled %d \n", op->op_code);
             } 
-        } else if (opId->id == IMD_TO_MEM_REG) {
-            fseek(f, idx, SEEK_SET);
+        } else if (opName == IMD_TO_MEM_REG) {
             ImdToRegMemOperation* op = malloc(sizeof(ImdToRegMemOperation));
-            fread(op, sizeof(ImdToRegMemOperation), 1, f);
-            idx += sizeof(ImdToRegMemOperation);
-            Displacement* disp = read_displacement_ptr(op->mod, op->rm, f, &idx); 
+            memcpy(op, mem->data+idx, sizeof(ImdToRegMemOperation));
+            bytesRead+=sizeof(ImdToRegMemOperation);
+            Displacement* disp = read_displacement_ptr(op->mod, op->rm, mem->data+idx+bytesRead); 
+            bytesRead+= disp->size;
+            DEBUG("displ %d %u\n", disp->value, disp->value);
 
             int data = 0;
             char* prefix = NULL;
             if (op->w == 0) {
-                data = read8Bit(f, &idx);
+                data= readByte(mem->data + idx + bytesRead);
                 prefix = "byte";
             } else {
-                data = read16Bit(f, &idx);
+                data = read2Bytes(mem->data + idx + bytesRead);
+                bytesRead++;
                 prefix = "word";
             }
+            bytesRead++;
 
             DEBUG("mod: %d rm: %d w: %d\n", op->mod, op->rm, op->w);
             operation = multi_reference_operation(MOV, idx, sizeof(ImdToRegMemOperation));
@@ -569,7 +572,6 @@ int main(int argc, char* argv[]) {
             {
                 operation->left->type = Raw;
                 operation->left->addr = arr[op->rm][op->w];
-                operation->left->addr = arr[op->rm][op->w];
             }
             else
             {
@@ -577,11 +579,11 @@ int main(int argc, char* argv[]) {
                 operation->left->addr = arr1[op->rm][op->w];;
                 operation->left->disp = disp;
             }
-        } else if (opId->id == ACC_TO_MEMORY) {
-            fseek(f, idx, SEEK_SET);
+        } else if (opName == ACC_TO_MEMORY) {
             AccumulatorToMemory* op = malloc(sizeof(AccumulatorToMemory));
-            fread(op, sizeof(AccumulatorToMemory), 1, f);
-            idx += sizeof(AccumulatorToMemory);
+            memcpy(op, mem->data+idx, sizeof(AccumulatorToMemory));
+
+            bytesRead+=sizeof(AccumulatorToMemory);
             operation = multi_reference_operation(MOV, idx, sizeof(AccumulatorToMemory));
             if (op->order == MEMORY_TO_ACC_FLAG)
             {
@@ -597,19 +599,17 @@ int main(int argc, char* argv[]) {
                 operation->left->type = DirectAccess;
                 operation->left->value = op->addr;
             }
-
-        } else if (opId->id == JMP) {
-            fseek(f, idx, SEEK_SET);
+        } else if (opName == JMP) {
             JMPOp* jumpOp = malloc(sizeof(JMPOp));
-            fread(jumpOp, sizeof(JMPOp), 1, f);
-            idx += sizeof(JMPOp);
+            memcpy(jumpOp, mem->data+idx, sizeof(JMPOp));
+            bytesRead += sizeof(JMPOp);
             int ipinc = 0;
             bool isConditional = jumpOp->op_code != 43;
             // 16 bit?
-            ipinc = read8Bit(f, &idx);
+            ipinc = readByte(mem->data+idx+bytesRead);
+            bytesRead++;
 
             char* opName = JMP_LABEL;
-            // printf("%d\n", jumpOp->op_code);
             if (isConditional) {
                 if (jumpOp->size == 1) {
                     opName = jumpOp->pad == 1 ? jcxz: loop;
@@ -618,9 +618,8 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            // + 1 : 2 this jump logic is probably wrong
-            // int i = (idx - sizeof(JMPOp) - (jumpOp->size == 1 ? 1: 2)) + ipinc + (isConditional ? 1: 2);
-            int i = (idx - sizeof(JMPOp) - (isConditional ? 0 : jumpOp->size == 1 ? 1: 2)) + ipinc + (isConditional ? 1: 2);
+            int i = idx + ipinc + bytesRead;
+            DEBUG("%d %d \n", i, ipinc);
             JumpLabel* jmp = jmpMap[i];
             if (jmp == NULL) {
                 jmp = malloc(sizeof(JumpLabel));
@@ -633,39 +632,37 @@ int main(int argc, char* argv[]) {
                 jmpMap[i] = jmp;
 
             }
-
             operation = jmp_operation(opName, ipinc, idx, sizeof(JMPOp) + (jumpOp->size == 1 ? 1: 2), jmp->label);
 
-        } else if (opId->id == COND_JMP) {
-            char* opName = "";
-            fseek(f, idx, SEEK_SET);
+        } else if (opName == COND_JMP) {
+            char* jmpName = "";
             CondJMPOP* jumpOp = malloc(sizeof(CondJMPOP));
-            fread(jumpOp, sizeof(CondJMPOP), 1, f);
-            idx += sizeof(CondJMPOP);
+            memcpy(jumpOp, mem->data+idx, sizeof(CondJMPOP));
+            bytesRead += sizeof(CondJMPOP);
             DEBUG("code: %d \n", jumpOp->op_code);
             switch (jumpOp->op_code) {
-                case 124: opName = jnge; break;
-                case 126: opName = jng; break;
-                case 114: opName = jnae; break;
-                case 118: opName = jna; break;
-                case 122: opName = jpe; break;
-                case 112: opName = jo; break;
-                case 117: opName = jnz; break;
-                case 120: opName = js; break;
-                case 125: opName = jge; break;
-                case 127: opName = jg; break;
-                case 116: opName = jz; break;
-                case 115: opName = jae; break;
-                case 119: opName = jnbe; break;
-                case 123: opName = jnp; break;
-                case 113: opName = jno; break;
-                case 121: opName = jns; break;
-                case 225: opName = loop; break;
-                case 226: opName = loopz; break;
-                case 224: opName = loopnz; break;
-                case 227: opName = jcxz; break;
+                case 124: jmpName = jnge; break;
+                case 126: jmpName = jng; break;
+                case 114: jmpName = jnae; break;
+                case 118: jmpName = jna; break;
+                case 122: jmpName = jpe; break;
+                case 112: jmpName = jo; break;
+                case 117: jmpName = jnz; break;
+                case 120: jmpName = js; break;
+                case 125: jmpName = jge; break;
+                case 127: jmpName = jg; break;
+                case 116: jmpName = jz; break;
+                case 115: jmpName = jae; break;
+                case 119: jmpName = jnbe; break;
+                case 123: jmpName = jnp; break;
+                case 113: jmpName = jno; break;
+                case 121: jmpName = jns; break;
+                case 225: jmpName = loop; break;
+                case 226: jmpName = loopz; break;
+                case 224: jmpName = loopnz; break;
+                case 227: jmpName = jcxz; break;
             }
-            int i = (idx - sizeof(CondJMPOP)) + jumpOp->value + 2;
+            int i = idx + jumpOp->value + bytesRead;
             JumpLabel* jmp = jmpMap[i];
             if (jmp == NULL) {
                 jmp = malloc(sizeof(JumpLabel));
@@ -679,13 +676,10 @@ int main(int argc, char* argv[]) {
 
             }
 
-            operation = jmp_operation(opName, jumpOp->value, idx, sizeof(CondJMPOP), jmp->label);
+            operation = jmp_operation(jmpName, jumpOp->value, idx, sizeof(CondJMPOP), jmp->label);
             DEBUG("idx: %d\n", jmp->idx);
-        } else if (opId->id == 0) {
-            DEBUG("Add \n", NULL);
-        } else {
-            idx += sizeof(RegToRegOperation);
         }
+
         if (operation != NULL) {
             if (initial == NULL) {
                 initial = operation;
@@ -698,7 +692,6 @@ int main(int argc, char* argv[]) {
             }
         }
     }
-
     Operation* itercur = initial;
     while (itercur != NULL) {
         JumpLabel* jmp = jmpMap[itercur->currentIdx];
@@ -708,7 +701,7 @@ int main(int argc, char* argv[]) {
         render_op(itercur);
         itercur = itercur->next;
     }
-    free(op);
-    free(opId);
+    free(jmpMap);
+    free(mem);
     return 0;
 }
