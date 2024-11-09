@@ -2,7 +2,7 @@
 
 
 asm_files=$(ls test-cases-decode/*.asm)
-gcc ./8086dec.c
+gcc ./8086dec.c ./dec.c
 
 for file in $asm_files; do
     t=$(mktemp)
