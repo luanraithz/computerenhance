@@ -2,6 +2,7 @@
 #include "stdint.h"
 #include "stdlib.h"
 #include "stdbool.h"
+#include <assert.h>
 #include <sys/stat.h>
 #include <string.h>
 #include <time.h>
@@ -37,6 +38,28 @@
 #define DEBUG(pattern, ...) if (argv[2] != NULL && argv[2][0] == 'D') { printf(pattern, __VA_ARGS__); }
 
 char* empty = "";
+char* plus = " + ";
+
+char* join(RegisterExpression reg) {
+    char* str = malloc(sizeof(char*) * 10 );
+    for (int i = 0; i < reg.size; i++) {
+        if (i > 0) {
+             strcat(str, plus);
+        }
+        strcat(str, reg.registers[i].label);
+    }
+    return str;
+}
+
+char* labels[] =  { "AX", "BX", "CX", "DX", "SP", "BP", "SI", "DI", };
+
+void print_state() {
+    for (int i = 0; i < 8; i ++) {
+        i16* value = mem.registers[i];
+        printf("%s: %i\n", labels[i], *value);
+    }
+}
+
 
 char* render_reference(Reference* ref) {
     char* str = malloc(sizeof(char) * 30);
@@ -57,29 +80,69 @@ char* render_reference(Reference* ref) {
                 }
             }
             break;
+        case JmpLabel:
+            sprintf(str,"%s", ref->label);
+            break;
         case Raw:
-            sprintf(str,"%s", ref->addr);
+            sprintf(str,"%s", join(ref->addr));
             break;
         case Expression:
             {
                 if (ref->disp != NULL && ref->disp->value != 0) {
                     if (ref->prefix != NULL) {
-                        sprintf(str,"%s [%s%s]", ref->prefix, ref->addr, ref->disp->label);
+                        sprintf(str,"%s [%s%s]", ref->prefix, join(ref->addr), ref->disp->label);
                     } else {
-                        sprintf(str,"[%s%s]", ref->addr, ref->disp->label);
+                        sprintf(str,"[%s%s]", join(ref->addr), ref->disp->label);
                     }
                 } else {
                     if (ref->prefix != NULL) {
-                        sprintf(str,"%s [%s]", ref->prefix, ref->addr);
+                        sprintf(str,"%s [%s]", ref->prefix, join(ref->addr));
                     } else {
-                        sprintf(str,"[%s]", ref->addr);
+                        sprintf(str,"[%s]", join(ref->addr));
                     }
+
                 }
             }
     }
     return str;
 }
 
+i16 get_value(Reference *ref) {
+    switch(ref->type) {
+        case DirectAccess: // TODO 
+            break;
+        case Value:
+            return (i16) ref->value;
+        case Raw: 
+            assert(ref->addr.size == 1);
+            i16* v = ref->addr.registers[0].addr;
+            return *v;
+            break;
+    }
+
+}
+
+
+void execute_op(Operation* op) {
+    if (op->name == MOV) {
+        i16 v = get_value(op->right);
+        assert(op->left->addr.size == 1);
+        i16* dest = op->left->addr.registers[0].addr;
+        *dest = v;
+    } else if (op->name == ADD) {
+        assert(op->left->addr.size == 1);
+        i16 vr = get_value(op->right);
+        i16 vl = get_value(op->left);
+        i16 *addr = op->left->addr.registers[0].addr;
+        *addr = vr + vl;
+    } else if (op->name == SUB) {
+        assert(op->left->addr.size == 1);
+        i16 vr = get_value(op->right);
+        i16 vl = get_value(op->left);
+        i16 *addr = op->left->addr.registers[0].addr;
+        *addr = vr - vl;
+    }
+}
 void render_op(Operation* op) {
     // memory leak
     if (op->right) {
@@ -124,13 +187,20 @@ int main(int argc, char* argv[]) {
     }
     DecodedOperations* dec = decode(mem, size);
     Operation* itercur = dec->initial;
+    bool run = argv[2] && argv[2][0] == 'r';
     while (itercur != NULL) {
         JumpLabel* jmp = dec->jmpMap[itercur->currentIdx];
         if (jmp != NULL) {
             printf("%s:\n", jmp->label);
         }
         render_op(itercur);
+        if (run) {
+            execute_op(itercur, &itercur);
+        }
         itercur = itercur->next;
+    }
+    if (run) {
+        print_state();
     }
     free(mem);
     return 0;

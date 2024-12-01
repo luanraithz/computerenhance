@@ -91,6 +91,7 @@ typedef struct Memory {
 enum ReferenceType {
     DirectAccess,
     Expression,
+    JmpLabel,
     Raw,
     Value
 };
@@ -101,8 +102,24 @@ typedef struct {
     int size;
 } Displacement;
 
+typedef struct ReferenceCalc {
+
+} ReferenceCalc;
+
+typedef struct RegisterLocation {
+    char* label;
+    void* addr;
+    u8 size;
+} RegisterLocation;
+
+typedef struct RegisterExpression {
+    const RegisterLocation* registers;
+    u8 size;
+} RegisterExpression;
+
 typedef struct {
-    char* addr;
+    RegisterExpression addr;
+    char* label;
     char* prefix;
     Displacement* disp;
     int value;
@@ -132,4 +149,23 @@ typedef struct DecodedOperations {
     JumpLabel** jmpMap;
 } DecodedOperations;
 
+
+typedef struct ReferenceExpression ReferenceExpression;
+
+typedef struct MemArray {
+    i16* registers[8];
+} MemArray;
+
+extern const MemArray mem;
+
+extern char* MOV;
+extern char* SUB;
+extern char* ADD;
+extern char* CMP;
+extern char* JMP_LABEL;
+extern char* AX;
+extern char* AL;
+
 DecodedOperations* decode(Memory* mem, int size);
+
+
