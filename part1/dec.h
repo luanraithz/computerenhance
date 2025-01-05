@@ -9,6 +9,7 @@
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef int16_t i16;
+typedef int8_t i8;
 
 #define RM unsigned int rm : 3
 #define MOD unsigned int mod : 2

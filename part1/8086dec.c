@@ -70,6 +70,8 @@ void print_state() {
     printf("Flags: ZF %i; SF %i \n", flags.zf, flags.sf);
 
     printf("\n\nMEMORY\n\n");
+    FILE *f = fopen("image.data", "w+r");
+    fwrite(valueMemory.data, sizeof(u8), 1024 * 1024, f);
     for (int i = 0; i < 1024 * 1024; i++) {
         if (valueMemory.data[i] != 0) {
             printf("%i:\t%i\n", &valueMemory.data[i] - valueMemory.data,
